@@ -121,4 +121,6 @@ model Round {
 
   game     Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
   location Location @relation(fields: [locationId], references: [id])
+
+  @@unique([gameId, locationId])
 }
