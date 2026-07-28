@@ -6,3 +6,74 @@ generator client {
 datasource db {
   provider = "postgresql"
 }
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+model User {
+  id       String @id @default(cuid())
+  username String @unique
+  email    String @unique
+  password String
+
+  role UserRole @default(USER)
+
+  createdAt DateTime @default(now())
+  updateAt  DateTime @updatedAt
+
+  games Game[]
+}
+
+model Location {
+  id String @id @default(cuid())
+
+  name        String
+  description String?
+
+  latitude  Decimal @db.Decimal(9, 6)
+  longitude Decimal @db.Decimal(9, 6)
+
+  imageUrl String?
+
+  createdAt DateTime @default(now())
+
+  rounds Round[]
+}
+
+model Game {
+  id String @id @default(cuid())
+
+  userId String
+
+  score Int @default(0)
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id])
+
+  rounds Round[]
+}
+
+model Round {
+  id String @id @default(cuid())
+
+  gameId     String
+  locationId String
+
+  roundNumber Int
+
+  guessLatitude  Decimal @db.Decimal(9, 6)
+  guessLongitude Decimal @db.Decimal(9, 6)
+
+  distanceMeters Decimal @db.Decimal(10, 2)
+
+  score Int
+
+  createdAt DateTime @default(now())
+
+  game     Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  location Location @relation(fields: [locationId], references: [id])
+}
