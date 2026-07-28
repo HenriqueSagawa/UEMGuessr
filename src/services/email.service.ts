@@ -18,17 +18,23 @@ export async function sendVerificationCodeEmail(to: string, code: string): Promi
     return;
   }
  
-  await transporter.sendMail({
-    from: env.SMTP_FROM,
-    to,
-    subject: "Confirme seu email — UEMGuessr",
-    html: `
-      <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
-        <h2>Confirme seu cadastro no UEMGuessr</h2>
-        <p>Use o código abaixo para confirmar seu email. Ele expira em 15 minutos.</p>
-        <p style="font-size: 32px; font-weight: bold; letter-spacing: 8px;">${code}</p>
-        <p>Se você não solicitou este cadastro, pode ignorar este email.</p>
-      </div>
-    `,
-  });
+  try {
+    const info = await transporter.sendMail({
+      from: env.SMTP_FROM,
+      to,
+      subject: "Confirme seu email — UEMGuessr",
+      html: `
+        <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+          <h2>Confirme seu cadastro no UEMGuessr</h2>
+          <p>Use o código abaixo para confirmar seu email. Ele expira em 15 minutos.</p>
+          <p style="font-size: 32px; font-weight: bold; letter-spacing: 8px;">${code}</p>
+          <p>Se você não solicitou este cadastro, pode ignorar este email.</p>
+        </div>
+      `,
+    });
+    logger.info(`[email] Email de verificação enviado para ${to}. MessageId: ${info.messageId}`);
+  } catch (error) {
+    logger.error(`[email] Erro ao enviar email de verificação para ${to}:`);
+    throw error;
+  }
 }
