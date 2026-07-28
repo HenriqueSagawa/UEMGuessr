@@ -5,6 +5,7 @@ import helmet from "helmet";
 import { env } from "./config/env";
 import { prisma } from "./config/prisma";
 import { logger } from "./utils/logger";
+import { httpLogger } from "./middlewares/httpLogger";
 import { rateLimiter } from "./middlewares/rateLimiter";
 import { errorHandler } from "./middlewares/errorHandler";
 import routes from "./routes";
@@ -15,6 +16,8 @@ app.use(helmet());
 app.use(cors({ origin: env.CORS_ORIGIN }));
 app.use(express.json());
 app.use(rateLimiter);
+
+app.use(httpLogger);
 
 app.use(routes);
 
