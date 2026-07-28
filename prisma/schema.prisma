@@ -37,6 +37,7 @@ model User {
   games Game[]
   emailVerificationCodes EmailVerificationCode[]
   refreshTokens          RefreshToken[]
+  locationsCreated       Location[]
 }
 
 model EmailVerificationCode {
@@ -76,6 +77,10 @@ model Location {
   longitude Decimal @db.Decimal(9, 6)
 
   imageUrl String?
+  imagePublicId String?
+
+  createdById String?
+  createdBy   User?   @relation(fields: [createdById], references: [id], onDelete: SetNull)
 
   createdAt DateTime @default(now())
 
