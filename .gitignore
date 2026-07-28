@@ -53,3 +53,9 @@ build/
 # Operating System Files
 .DS_Store
 Thumbs.db
+
+/generated/prisma
+/.agents
+/.claude
+/.windsurf
+skills-lock.json
