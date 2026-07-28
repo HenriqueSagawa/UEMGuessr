@@ -13,6 +13,8 @@ import routes from "./routes";
 
 const app = express();
 
+app.set("trust proxy", 1);
+
 app.use(helmet());
 app.use(cors({ origin: env.CORS_ORIGIN, credentials: true }));
 app.use(express.json());
