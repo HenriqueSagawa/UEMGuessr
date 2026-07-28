@@ -6,7 +6,7 @@ import { hashValue, compareValue } from "../../lib/hash";
 import { signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken } from "../../lib/jwt";
 import { getGoogleUser } from "../../lib/GoogleOAuth";
 import { sendVerificationCodeEmail } from "../../services/email.service";
-import type { RegisterInput, LoginInput } from "./auth.schema";
+import type { RegisterInput, LoginInput } from "./auth.schemas";
 
 const VERIFICATION_CODE_TTL_MS = 15 * 60 * 1000;
 const REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;

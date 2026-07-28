@@ -11,3 +11,14 @@ export const rateLimiter = rateLimit({
       "Muitas requisições feitas a partir deste IP. Por favor, tente novamente mais tarde.",
   },
 });
+
+export const authRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    status: "error",
+    message: "Muitas tentativas. Por favor, tente novamente em alguns minutos.",
+  },
+});
