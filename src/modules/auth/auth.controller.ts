@@ -69,7 +69,7 @@ export async function login(req: Request, res: Response, next: NextFunction) {
 
 export async function refresh(req: Request, res: Response, next: NextFunction) {
   try {
-    const token = req.body.refreshToken ?? req.cookies?.[REFRESH_COOKIE_NAME];
+    const token = req.body?.refreshToken ?? req.cookies?.[REFRESH_COOKIE_NAME];
     if (!token) throw new AppError("Refresh token não informado.", 401);
 
     const { user, accessToken, refreshToken } = await authService.refreshTokens(token);
@@ -82,7 +82,7 @@ export async function refresh(req: Request, res: Response, next: NextFunction) {
 
 export async function logout(req: Request, res: Response, next: NextFunction) {
   try {
-    const token = req.body.refreshToken ?? req.cookies?.[REFRESH_COOKIE_NAME];
+    const token = req.body?.refreshToken ?? req.cookies?.[REFRESH_COOKIE_NAME];
     if (token) await authService.logout(token);
 
     res.clearCookie(REFRESH_COOKIE_NAME, { path: "/auth" });
