@@ -16,7 +16,6 @@ router.post("/register", authRateLimiter, validate(registerSchema), authControll
 router.post("/verify-email", authRateLimiter, validate(verifyEmailSchema), authController.verifyEmail);
 router.post("/resend-code", authRateLimiter, validate(resendCodeSchema), authController.resendCode);
 router.post("/login", authRateLimiter, validate(loginSchema), authController.login);
-// refreshToken pode vir do cookie httpOnly ou do body (ex: apps mobile) — validado no controller
 router.post("/refresh", authController.refresh);
 router.post("/logout", authController.logout);
 router.get("/me", authenticate, authController.me);
