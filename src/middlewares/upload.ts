@@ -12,11 +12,19 @@ function fileFilter(_req: Request, file: Express.Multer.File, cb: multer.FileFil
   cb(null, true);
 }
 
+const MAX_AVATAR_SIZE_BYTES = 2 * 1024 * 1024;
+
 const multerUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MAX_FILE_SIZE_BYTES },
   fileFilter,
 }).single("image");
+
+const multerAvatarUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_AVATAR_SIZE_BYTES },
+  fileFilter,
+}).single("avatar");
  
 export function uploadLocationImage(req: Request, res: Response, next: NextFunction) {
   multerUpload(req, res, (error: unknown) => {
@@ -29,5 +37,19 @@ export function uploadLocationImage(req: Request, res: Response, next: NextFunct
     }
  
     return next(new AppError("Falha ao processar o upload da imagem.", 422));
+  });
+}
+
+export function uploadAvatarImage(req: Request, res: Response, next: NextFunction) {
+  multerAvatarUpload(req, res, (error: unknown) => {
+    if (!error) return next();
+
+    if (error instanceof AppError) return next(error);
+
+    if (error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE") {
+      return next(new AppError("A imagem de perfil não pode passar de 2MB.", 422));
+    }
+
+    return next(new AppError("Falha ao processar o upload da imagem de perfil.", 422));
   });
 }

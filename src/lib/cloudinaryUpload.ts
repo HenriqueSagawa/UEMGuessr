@@ -2,17 +2,18 @@ import { cloudinary } from "../config/cloudinary";
 import { AppError } from "../utils/appError";
 
 const LOCATIONS_FOLDER = "locations";
+const AVATARS_FOLDER = "avatars"
 
 export interface UploadedImage {
   url: string;
   publicId: string;
 }
 
-export function uploadImageBuffer(buffer: Buffer): Promise<UploadedImage> {
+export function uploadImageBuffer(buffer: Buffer, folder: string = LOCATIONS_FOLDER): Promise<UploadedImage> {
   return new Promise((resolve, reject) => {
     const uploadStream = cloudinary.uploader.upload_stream(
       {
-        folder: LOCATIONS_FOLDER,
+        folder,
         resource_type: "image",
       },
       (error, result) => {
@@ -24,6 +25,27 @@ export function uploadImageBuffer(buffer: Buffer): Promise<UploadedImage> {
       },
     );
 
+    uploadStream.end(buffer);
+  });
+}
+
+export function uploadAvatarImageBuffer(buffer: Buffer): Promise<UploadedImage> {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      {
+        folder: AVATARS_FOLDER,
+        resource_type: "image",
+        transformation: [{ width: 512, height: 512, crop: "fill", gravity: "face" }],
+      },
+      (error, result) => {
+        if (error || !result) {
+          console.error("Cloudinary upload error:", error);
+          return reject(new AppError("Falha ao enviar a imagem para o Cloudinary.", 502));
+        }
+        resolve({ url: result.secure_url, publicId: result.public_id });
+      },
+    );
+ 
     uploadStream.end(buffer);
   });
 }
