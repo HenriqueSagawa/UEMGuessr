@@ -28,6 +28,11 @@ model User {
   provider  AuthProvider @default(LOCAL)
   googleId  String?      @unique
   avatarUrl String?
+  avatarPublicId String?
+
+  displayName String?
+  bio         String? @db.VarChar(280)
+  themeColor  String? @db.VarChar(7)
 
   emailVerified Boolean @default(false)
 
