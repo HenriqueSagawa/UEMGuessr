@@ -2,6 +2,7 @@ import { Router } from 'express';
 import authRoutes from '../modules/auth/auth.routes';
 import locationsRoutes from "../modules/locations/locations.routes"
 import gamesRoutes from "../modules/games/games.routes"
+import usersRoutes from "../modules/users/users.routes"
 
 const routes = Router();
 
@@ -14,5 +15,7 @@ routes.use('/auth', authRoutes);
 routes.use('/locations', locationsRoutes)
 
 routes.use('/games', gamesRoutes)
+
+routes.use('/users', usersRoutes)
 
 export default routes;
