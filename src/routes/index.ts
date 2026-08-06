@@ -4,6 +4,7 @@ import locationsRoutes from '../modules/locations/locations.routes';
 import gamesRoutes from '../modules/games/games.routes';
 import usersRoutes from '../modules/users/users.routes';
 import dailyChallengeRoutes from '../modules/dailyChallenge/dailyChallenge.routes';
+import rankedRoutes from '../modules/ranked/ranked.routes';
 
 const routes = Router();
 
@@ -20,5 +21,7 @@ routes.use('/games', gamesRoutes);
 routes.use('/users', usersRoutes);
 
 routes.use('/daily-challenges', dailyChallengeRoutes);
+
+routes.use('/ranked', rankedRoutes);
 
 export default routes;

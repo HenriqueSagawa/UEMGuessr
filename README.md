@@ -208,7 +208,8 @@ UEMGuessr/
 │   │   ├── users/              # perfil e avatar
 │   │   ├── locations/          # CRUD de locais (admin)
 │   │   ├── games/              # partidas, rodadas, pontuação
-│   │   └── dailyChallenge/     # desafio diário e ranking
+│   │   ├── dailyChallenge/     # desafio diário e ranking
+│   │   └── ranked/             # modo ranqueado (fila, partidas, temporadas)
 │   ├── routes/                # agregador central de rotas
 │   ├── services/               # serviços transversais (e-mail)
 │   ├── utils/                  # AppError, logger, gerador de código
@@ -231,6 +232,16 @@ erDiagram
     User ||--o{ PasswordResetCode : "possui"
     Game ||--o{ Round : "contém"
     Location ||--o{ Round : "é alvo de"
+    Location ||--o{ DailyChallenge : "é o alvo de"
+    DailyChallenge ||--o{ DailyChallengeAttempt : "recebe"
+    User ||--o{ DailyChallengeAttempt : "faz"
+    Season ||--o{ RankedProfile : "tem"
+    User ||--o{ RankedProfile : "possui"
+    Season ||--o{ RankedMatch : "contém"
+    RankedMatch ||--o{ RankedRound : "contém"
+    Location ||--o{ RankedRound : "é alvo de"
+    Season ||--o{ RankedQueueEntry : "possui"
+    User ||--o{ RankedQueueEntry : "entra na fila"
 
     User {
         string id PK
@@ -271,6 +282,76 @@ erDiagram
         decimal guessLongitude
         decimal distanceMeters
         int score
+    }
+
+    DailyChallenge {
+        string id PK
+        datetime challengeDate
+        int timeLimitSeconds
+        string locationId FK
+    }
+
+    DailyChallengeAttempt {
+        string id PK
+        string challengeId FK
+        string userId FK
+        decimal guessLatitude
+        decimal guessLongitude
+        int score
+        datetime startedAt
+        datetime submittedAt
+    }
+
+    Season {
+        string id PK
+        string name
+        enum status
+        datetime startsAt
+        datetime endsAt
+    }
+
+    RankedProfile {
+        string id PK
+        string userId FK
+        string seasonId FK
+        int rating
+        enum division
+        int wins
+        int losses
+    }
+
+    RankedMatch {
+        string id PK
+        string seasonId FK
+        string player1Id FK
+        string player2Id FK
+        int player1Health
+        int player2Health
+        decimal roundMultiplier
+        int currentRoundNumber
+        string winnerId FK
+    }
+
+    RankedRound {
+        string id PK
+        string matchId FK
+        string locationId FK
+        int roundNumber
+        decimal multiplier
+        datetime deadline
+        int player1Score
+        int player2Score
+        int player1Damage
+        int player2Damage
+    }
+
+    RankedQueueEntry {
+        string id PK
+        string seasonId FK
+        string userId FK
+        int rating
+        enum status
+        datetime expiresAt
     }
 ```
 
@@ -389,6 +470,31 @@ O desafio diário oferece o **mesmo local para todos os jogadores** a cada 24h (
 | `GET` | `/daily-challenges/:id/leaderboard` | Ranking dos melhores jogadores do desafio (+ posição do usuário) | 🔒 JWT |
 
 > **Fluxo:** o jogador consulta `/current` → inicia em `/start` (o cronômetro começa) → responde em `/submit` dentro do tempo limite → confere a posição no ranking em `/leaderboard`. Cada usuário tem direito a **um único palpite** por desafio.
+
+</details>
+
+<details>
+<summary><b>🏆 <code>/ranked</code> — Modo ranqueado (1v1)</b></summary>
+<br/>
+
+Dois jogadores buscam a partida pela **fila de matchmaking** (pareados pela menor diferença de rating). Ambos recebem o **mesmo local** e têm 60s para responder; quem responde **antes dos últimos 15s** encurta o prazo do adversário para 15s. Cada um começa com **5000 de HP**; a diferença de pontos da rodada é convertida em dano **multiplicado por um fator crescente** (1.0, 1.5, 2.0, …). A partida tem número indeterminado de rodadas e termina quando o HP de um jogador zera. O vencedor ganha **+25 pontos** e o perdedor **−25 pontos**, movendo as divisões (Bronze I–III, Prata I–III, Ouro I–III, Platina I–III, Diamante I–III e Mestre). O ranking é **resetado a cada temporada**.
+
+| Método | Rota | Descrição | Proteção |
+|---|---|---|---|
+| `GET` | `/ranked/me` | Perfil ranqueado do usuário na temporada atual (rating, divisão, wins/losses) | 🔒 JWT |
+| `GET` | `/ranked/season/current` | Temporada ativa + perfil do usuário | 🔒 JWT |
+| `GET` | `/ranked/leaderboard` | Ranking dos melhores jogadores da temporada | 🔒 JWT |
+| `POST` | `/ranked/queue/join` | Entra na fila de matchmaking (retorna `matched` ou `queued`) | 🔒 JWT |
+| `GET` | `/ranked/queue/status` | Consulta a fila (retorna o `matchId` quando encontrado) | 🔒 JWT |
+| `POST` | `/ranked/queue/leave` | Sai da fila de espera | 🔒 JWT |
+| `GET` | `/ranked/matches/:id` | Estado da partida (rodada atual, locais, prazos, resultado da última rodada) | 🔒 JWT |
+| `POST` | `/ranked/matches/:id/rounds/:roundNumber/answer` | Envia o palpite (lat/lng) da rodada atual | 🔒 JWT |
+| `POST` | `/ranked/seasons` | Cria/encerra temporadas (reset do ranking) | 🔒 Admin |
+| `POST` | `/ranked/seasons/current/end` | Encerra a temporada ativa manualmente | 🔒 Admin |
+| `GET` | `/ranked/seasons` | Lista temporadas | 🔒 Admin |
+
+> **Pontuação do dano:** `dano = |score_meu − score_adversário| × multiplicador`. O multiplicador cresce 0.5 a cada rodada. Sem resposta dentro do prazo, o jogador vale 0 pontos na rodada.
+> **Divisões:** os pontos movem o jogador entre as faixas (ex.: Bronze III 0–399, Prata III 1200–1599, Mestre 6000+).
 
 </details>
 
@@ -520,8 +626,9 @@ npm test
 - [x] Motor de partidas com pontuação geoespacial
 - [x] Suíte de testes automatizados
 - [ ] Modo multiplayer em tempo real (duelo 1x1)
-- [ ] Sistema de ranking/Elo entre jogadores
+- [x] Sistema de ranking/Elo entre jogadores
 - [x] Desafio diário
+- [x] Modo ranqueado (matchmaking 1v1, divisões e temporadas)
 - [ ] Frontend web definitivo (Next.js)
 - [ ] Documentação interativa da API (Swagger/OpenAPI)
 
