@@ -128,4 +128,5 @@ model Round {
   location Location @relation(fields: [locationId], references: [id])
 
   @@unique([gameId, locationId])
+  @@unique([gameId, roundNumber])
 }

@@ -208,6 +208,21 @@ describe("submitGuess", () => {
     });
   });
 
+  it("lança 409 quando o roundNumber é duplicado por concorrência (P2002)", async () => {
+    mockGameFindUnique.mockResolvedValue(gameRecord());
+    mockLocationFindUnique.mockResolvedValue(location);
+    mockRoundCount.mockResolvedValue(0);
+    mockTransaction.mockRejectedValue({
+      code: "P2002",
+      meta: { target: ["gameId", "roundNumber"] },
+    });
+
+    await expect(submitGuess("game-1", "user-1", input)).rejects.toMatchObject({
+      statusCode: 409,
+      message: expect.stringContaining("Concorrência detectada"),
+    });
+  });
+
   it("calcula distância e pontuação e registra a rodada", async () => {
     mockGameFindUnique.mockResolvedValue(gameRecord());
     mockLocationFindUnique.mockResolvedValue(location);

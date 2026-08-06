@@ -151,6 +151,13 @@ export async function submitGuess(gameId: string, userId: string, input: SubmitG
     ]);
   } catch (error: unknown) {
     if (typeof error === "object" && error !== null && "code" in error && error.code === "P2002") {
+      const target = (error as { meta?: { target?: string[] } }).meta?.target;
+      if (target?.includes("roundNumber")) {
+        throw new AppError(
+          "Concorrência detectada: esta rodada já foi registrada. Recarregue a partida.",
+          409,
+        );
+      }
       throw new AppError("Você já enviou um palpite para este local nesta partida.", 409);
     }
     throw error;
