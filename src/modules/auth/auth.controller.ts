@@ -39,7 +39,7 @@ export async function verifyEmail(req: Request, res: Response, next: NextFunctio
     const { user, accessToken, refreshToken } = await authService.verifyEmail(email, code);
 
     setRefreshCookie(res, refreshToken);
-    return res.status(200).json({ status: "success", data: { user, accessToken, refreshToken } });
+    return res.status(200).json({ status: "success", data: { user, accessToken } });
   } catch (error) {
     next(error);
   }
@@ -61,7 +61,7 @@ export async function login(req: Request, res: Response, next: NextFunction) {
   try {
     const { user, accessToken, refreshToken } = await authService.login(req.body);
     setRefreshCookie(res, refreshToken);
-    return res.status(200).json({ status: "success", data: { user, accessToken, refreshToken } });
+    return res.status(200).json({ status: "success", data: { user, accessToken } });
   } catch (error) {
     next(error);
   }
@@ -74,7 +74,7 @@ export async function refresh(req: Request, res: Response, next: NextFunction) {
 
     const { user, accessToken, refreshToken } = await authService.refreshTokens(token);
     setRefreshCookie(res, refreshToken);
-    return res.status(200).json({ status: "success", data: { user, accessToken, refreshToken } });
+    return res.status(200).json({ status: "success", data: { user, accessToken } });
   } catch (error) {
     next(error);
   }
