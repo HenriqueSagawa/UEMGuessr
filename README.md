@@ -207,7 +207,8 @@ UEMGuessr/
 │   │   ├── auth/              # registro, login, verificação, refresh, OAuth
 │   │   ├── users/              # perfil e avatar
 │   │   ├── locations/          # CRUD de locais (admin)
-│   │   └── games/              # partidas, rodadas, pontuação
+│   │   ├── games/              # partidas, rodadas, pontuação
+│   │   └── dailyChallenge/     # desafio diário e ranking
 │   ├── routes/                # agregador central de rotas
 │   ├── services/               # serviços transversais (e-mail)
 │   ├── utils/                  # AppError, logger, gerador de código
@@ -375,6 +376,23 @@ Cada partida (`Game`) tem **5 rodadas** (`TOTAL_ROUNDS_PER_GAME`), e o score fin
 </details>
 
 <details>
+<summary><b>🎯 <code>/daily-challenges</code> — Desafio diário</b></summary>
+<br/>
+
+O desafio diário oferece o **mesmo local para todos os jogadores** a cada 24h (reset no meia-noite UTC). Cada jogador pode participar **apenas uma vez** e tem **um tempo limitado** para posicionar o pin no mapa. O mapa é sorteado automaticamente ao primeiro acesso do dia, evitando repetir locais usados nos últimos 7 dias.
+
+| Método | Rota | Descrição | Proteção |
+|---|---|---|---|
+| `GET` | `/daily-challenges/current` | Retorna o desafio ativo (foto do local, tempo restante da janela e status do usuário) | 🔒 JWT |
+| `POST` | `/daily-challenges/:id/start` | Inicia a tentativa e inicia o cronômetro de resposta | 🔒 JWT |
+| `POST` | `/daily-challenges/:id/submit` | Envia o palpite (lat/lng), valida o tempo e retorna o score | 🔒 JWT |
+| `GET` | `/daily-challenges/:id/leaderboard` | Ranking dos melhores jogadores do desafio (+ posição do usuário) | 🔒 JWT |
+
+> **Fluxo:** o jogador consulta `/current` → inicia em `/start` (o cronômetro começa) → responde em `/submit` dentro do tempo limite → confere a posição no ranking em `/leaderboard`. Cada usuário tem direito a **um único palpite** por desafio.
+
+</details>
+
+<details>
 <summary><b>❤️ <code>/health</code> — Healthcheck</b></summary>
 <br/>
 
@@ -503,7 +521,7 @@ npm test
 - [x] Suíte de testes automatizados
 - [ ] Modo multiplayer em tempo real (duelo 1x1)
 - [ ] Sistema de ranking/Elo entre jogadores
-- [ ] Desafio diário
+- [x] Desafio diário
 - [ ] Frontend web definitivo (Next.js)
 - [ ] Documentação interativa da API (Swagger/OpenAPI)
 

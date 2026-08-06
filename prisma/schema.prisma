@@ -18,16 +18,16 @@ enum AuthProvider {
 }
 
 model User {
-  id       String @id @default(cuid())
-  username String @unique
-  email    String @unique
+  id       String  @id @default(cuid())
+  username String  @unique
+  email    String  @unique
   password String?
 
   role UserRole @default(USER)
 
-  provider  AuthProvider @default(LOCAL)
-  googleId  String?      @unique
-  avatarUrl String?
+  provider       AuthProvider @default(LOCAL)
+  googleId       String?      @unique
+  avatarUrl      String?
   avatarPublicId String?
 
   displayName String?
@@ -39,11 +39,12 @@ model User {
   createdAt DateTime @default(now())
   updateAt  DateTime @updatedAt
 
-  games Game[]
+  games                  Game[]
   emailVerificationCodes EmailVerificationCode[]
   passwordResetCodes     PasswordResetCode[]
   refreshTokens          RefreshToken[]
   locationsCreated       Location[]
+  dailyChallengeAttempts DailyChallengeAttempt[]
 }
 
 model EmailVerificationCode {
@@ -85,7 +86,6 @@ model RefreshToken {
   @@index([userId])
 }
 
-
 model Location {
   id String @id @default(cuid())
 
@@ -95,7 +95,7 @@ model Location {
   latitude  Decimal @db.Decimal(9, 6)
   longitude Decimal @db.Decimal(9, 6)
 
-  imageUrl String?
+  imageUrl      String?
   imagePublicId String?
 
   createdById String?
@@ -103,7 +103,8 @@ model Location {
 
   createdAt DateTime @default(now())
 
-  rounds Round[]
+  rounds          Round[]
+  dailyChallenges DailyChallenge[]
 }
 
 model Game {
@@ -143,4 +144,40 @@ model Round {
 
   @@unique([gameId, locationId])
   @@unique([gameId, roundNumber])
+}
+
+model DailyChallenge {
+  id               String   @id @default(cuid())
+  challengeDate    DateTime @unique
+  startsAt         DateTime
+  endsAt           DateTime
+  timeLimitSeconds Int      @default(60)
+  locationId       String
+  createdAt        DateTime @default(now())
+
+  location Location                @relation(fields: [locationId], references: [id])
+  attempts DailyChallengeAttempt[]
+
+  @@index([startsAt])
+  @@index([endsAt])
+}
+
+model DailyChallengeAttempt {
+  id          String @id @default(cuid())
+  challengeId String
+  userId      String
+
+  guessLatitude  Decimal? @db.Decimal(9, 6)
+  guessLongitude Decimal? @db.Decimal(9, 6)
+  distanceMeters Decimal? @db.Decimal(10, 2)
+  score          Int?
+
+  startedAt   DateTime  @default(now())
+  submittedAt DateTime?
+
+  challenge DailyChallenge @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([challengeId, userId])
+  @@index([challengeId, score])
 }
