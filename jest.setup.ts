@@ -1,0 +1,11 @@
+process.env.NODE_ENV = 'test';
+process.env.DATABASE_URL = 'postgresql://user:pass@localhost:5432/uemguessr_test';
+process.env.JWT_ACCESS_SECRET = 'a'.repeat(32);
+process.env.JWT_REFRESH_SECRET = 'b'.repeat(32);
+process.env.GOOGLE_CLIENT_ID = 'test-client-id';
+process.env.GOOGLE_CLIENT_SECRET = 'test-client-secret';
+process.env.GOOGLE_REDIRECT_URI = 'http://localhost:3000/auth/google/callback';
+process.env.FRONTEND_URL = 'http://localhost:5173';
+process.env.CLOUDINARY_CLOUD_NAME = 'test';
+process.env.CLOUDINARY_API_KEY = 'test';
+process.env.CLOUDINARY_API_SECRET = 'test';
