@@ -1,7 +1,11 @@
 import {
   BASE_RATING,
+  ELO_DIVISOR,
+  ELO_K,
   divisionForRating,
   divisionLabel,
+  expectedScore,
+  ratingDelta,
   roundDamage,
   roundMultiplier,
   MULTIPLIER_INCREMENT,
@@ -53,5 +57,40 @@ describe('roundDamage', () => {
     expect(roundDamage(300, 2)).toBe(600);
     expect(roundDamage(0, 3)).toBe(0);
     expect(roundDamage(-10, 1)).toBe(0);
+  });
+});
+
+describe('expectedScore', () => {
+  it('retorna 0.5 para oponentes com o mesmo rating', () => {
+    expect(expectedScore(1200, 1200)).toBeCloseTo(0.5);
+  });
+
+  it('favorece o jogador com maior rating', () => {
+    expect(expectedScore(1200, 800)).toBeGreaterThan(0.5);
+    expect(expectedScore(800, 1200)).toBeLessThan(0.5);
+  });
+});
+
+describe('ratingDelta', () => {
+  it('distribui o K igualmente quando os ratings são iguais', () => {
+    expect(ratingDelta(1200, 1200, 1)).toBe(Math.round(ELO_K * 0.5));
+    expect(ratingDelta(1200, 1200, 0)).toBe(-Math.round(ELO_K * 0.5));
+  });
+
+  it('ganhar de um oponente mais forte rende mais pontos', () => {
+    const winVsStronger = ratingDelta(1200, 1600, 1);
+    const winVsEqual = ratingDelta(1200, 1200, 1);
+    expect(winVsStronger).toBeGreaterThan(winVsEqual);
+  });
+
+  it('perder para um oponente mais forte custa menos pontos', () => {
+    const lossVsStronger = ratingDelta(1200, 1600, 0);
+    const lossVsEqual = ratingDelta(1200, 1200, 0);
+    expect(lossVsStronger).toBeGreaterThan(lossVsEqual);
+  });
+
+  it('usa o divisor padrão de 400 no cálculo', () => {
+    const p = Math.pow(10, (1600 - 1200) / ELO_DIVISOR);
+    expect(expectedScore(1200, 1600)).toBeCloseTo(1 / (1 + p));
   });
 });

@@ -56,7 +56,8 @@ export function divisionLabel(division: string): string {
 
 export const INITIAL_HEALTH = 5000;
 export const BASE_RATING = 1200;
-export const RATING_POINTS_PER_MATCH = 25;
+export const ELO_K = 40;
+export const ELO_DIVISOR = 400;
 export const ROUND_TIME_LIMIT_SECONDS = 60;
 export const EARLY_ANSWER_WINDOW_SECONDS = 15;
 export const MULTIPLIER_START = 1;
@@ -72,4 +73,21 @@ export function roundDamage(
   multiplier: number,
 ): number {
   return Math.floor(Math.max(0, scoreDifference) * multiplier);
+}
+
+export function expectedScore(
+  ownRating: number,
+  opponentRating: number,
+): number {
+  return 1 / (1 + Math.pow(10, (opponentRating - ownRating) / ELO_DIVISOR));
+}
+
+export function ratingDelta(
+  ownRating: number,
+  opponentRating: number,
+  result: 0 | 1,
+): number {
+  return Math.round(
+    ELO_K * (result - expectedScore(ownRating, opponentRating)),
+  );
 }

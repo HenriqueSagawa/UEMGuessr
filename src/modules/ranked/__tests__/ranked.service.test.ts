@@ -1,7 +1,7 @@
 import {
-  RATING_POINTS_PER_MATCH,
   ROUND_TIME_LIMIT_SECONDS,
   EARLY_ANSWER_WINDOW_SECONDS,
+  ratingDelta,
 } from '../ranked.lib';
 import {
   getActiveSeason,
@@ -14,6 +14,7 @@ import {
   getRankedLeaderboard,
   createSeason,
   endCurrentSeason,
+  resolveRound,
 } from '../ranked.service';
 import { prisma } from '../../../config/prisma';
 
@@ -97,8 +98,14 @@ const ROUND_DEADLINE = new Date(NOW.getTime() + 50_000);
 
 const mockTx = {
   rankedRound: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
-  rankedMatch: { update: jest.fn(), updateMany: jest.fn() },
+  rankedMatch: {
+    create: jest.fn(),
+    findFirst: jest.fn(),
+    update: jest.fn(),
+    updateMany: jest.fn(),
+  },
   rankedProfile: { findUnique: jest.fn(), update: jest.fn() },
+  rankedQueueEntry: { updateMany: jest.fn(), update: jest.fn() },
   location: { count: jest.fn(), findFirst: jest.fn() },
 };
 
@@ -202,10 +209,14 @@ beforeEach(() => {
   mockTx.rankedRound.findUnique.mockReset();
   mockTx.rankedRound.create.mockReset();
   mockTx.rankedRound.update.mockReset();
+  mockTx.rankedMatch.create.mockReset();
+  mockTx.rankedMatch.findFirst.mockReset();
   mockTx.rankedMatch.update.mockReset();
   mockTx.rankedMatch.updateMany.mockReset();
   mockTx.rankedProfile.findUnique.mockReset();
   mockTx.rankedProfile.update.mockReset();
+  mockTx.rankedQueueEntry.updateMany.mockReset();
+  mockTx.rankedQueueEntry.update.mockReset();
   mockTx.location.count.mockReset();
   mockTx.location.findFirst.mockReset();
   mockTransaction.mockImplementation(async (arg: unknown) => {
@@ -253,14 +264,16 @@ describe('joinRankedQueue', () => {
       queueEntryRecord({ id: 'q1', userId: 'user-9', rating: 2000 }),
       queueEntryRecord({ id: 'q2', userId: 'user-2', rating: 1230 }),
     ]);
-    mockLocationCount.mockResolvedValue(1);
-    mockLocationFindFirst.mockResolvedValue({
+    mockTx.rankedQueueEntry.updateMany.mockResolvedValue({ count: 1 });
+    mockTx.rankedMatch.findFirst.mockResolvedValue(null);
+    mockTx.location.count.mockResolvedValue(1);
+    mockTx.location.findFirst.mockResolvedValue({
       id: 'loc-1',
       latitude: 0,
       longitude: 0,
     });
-    mockMatchCreate.mockResolvedValue({ id: 'match-1' });
-    mockQueueUpdate.mockResolvedValue(queueEntryRecord({ status: 'MATCHED' }));
+    mockTx.rankedMatch.create.mockResolvedValue({ id: 'match-1' });
+    mockTx.rankedQueueEntry.update.mockResolvedValue({});
 
     const result = await joinRankedQueue('user-1');
 
@@ -277,7 +290,11 @@ describe('joinRankedQueue', () => {
         orderBy: { createdAt: 'asc' },
       }),
     );
-    expect(mockMatchCreate).toHaveBeenCalledWith(
+    expect(mockTx.rankedQueueEntry.updateMany).toHaveBeenCalledWith({
+      where: { id: 'q2', status: 'WAITING' },
+      data: { status: 'MATCHED' },
+    });
+    expect(mockTx.rankedMatch.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           player1Id: 'user-2',
@@ -286,11 +303,49 @@ describe('joinRankedQueue', () => {
         }),
       }),
     );
-    expect(mockQueueUpdate).toHaveBeenCalledWith({
+    expect(mockTx.rankedQueueEntry.update).toHaveBeenCalledWith({
       where: { id: 'q2' },
-      data: { status: 'MATCHED', matchedMatchId: 'match-1' },
+      data: { matchedMatchId: 'match-1' },
     });
     expect(result).toEqual({ status: 'matched', matchId: 'match-1' });
+  });
+
+  it('reusa a partida já criada pelo oponente em pedido concorrente', async () => {
+    mockSeasonFindFirst.mockResolvedValue(seasonRecord());
+    mockProfileFindUnique.mockResolvedValue(profileRecord());
+    mockMatchFindFirst.mockResolvedValue(null);
+    mockQueueDeleteMany.mockResolvedValue({ count: 0 });
+    mockQueueFindMany.mockResolvedValue([queueEntryRecord({ id: 'q2' })]);
+    mockTx.rankedQueueEntry.updateMany.mockResolvedValue({ count: 1 });
+    mockTx.rankedMatch.findFirst.mockResolvedValue({ id: 'match-1' });
+
+    const result = await joinRankedQueue('user-1');
+
+    expect(mockTx.rankedMatch.create).not.toHaveBeenCalled();
+    expect(result).toEqual({ status: 'matched', matchId: 'match-1' });
+  });
+
+  it('tenta novamente quando outro request já reservou o candidato', async () => {
+    mockSeasonFindFirst.mockResolvedValue(seasonRecord());
+    mockProfileFindUnique.mockResolvedValue(profileRecord());
+    mockMatchFindFirst.mockResolvedValue(null);
+    mockQueueDeleteMany.mockResolvedValue({ count: 0 });
+    mockQueueFindMany
+      .mockResolvedValueOnce([queueEntryRecord({ id: 'q2' })])
+      .mockResolvedValue([]);
+    mockQueueCreate.mockResolvedValue(
+      queueEntryRecord({ id: 'queue-1', userId: 'user-1' }),
+    );
+    mockTx.rankedQueueEntry.updateMany.mockResolvedValue({ count: 0 });
+
+    const result = await joinRankedQueue('user-1');
+
+    expect(mockTx.rankedQueueEntry.updateMany).toHaveBeenCalledWith({
+      where: { id: 'q2', status: 'WAITING' },
+      data: { status: 'MATCHED' },
+    });
+    expect(mockTx.rankedMatch.create).not.toHaveBeenCalled();
+    expect(result).toEqual({ status: 'queued', queueId: 'queue-1' });
   });
 
   it('entra na fila quando não há oponente', async () => {
@@ -329,13 +384,16 @@ describe('joinRankedQueue', () => {
     mockQueueCreate.mockResolvedValue(
       queueEntryRecord({ id: 'queue-1', userId: 'user-1' }),
     );
-    mockLocationCount.mockResolvedValue(1);
-    mockLocationFindFirst.mockResolvedValue({
+    mockTx.rankedQueueEntry.updateMany.mockResolvedValue({ count: 1 });
+    mockTx.rankedMatch.findFirst.mockResolvedValue(null);
+    mockTx.location.count.mockResolvedValue(1);
+    mockTx.location.findFirst.mockResolvedValue({
       id: 'loc-1',
       latitude: 0,
       longitude: 0,
     });
-    mockMatchCreate.mockResolvedValue({ id: 'match-1' });
+    mockTx.rankedMatch.create.mockResolvedValue({ id: 'match-1' });
+    mockTx.rankedQueueEntry.update.mockResolvedValue({});
     mockQueueUpdate.mockResolvedValue({});
 
     const result = await joinRankedQueue('user-1');
@@ -518,13 +576,11 @@ describe('submitRankedAnswer', () => {
   });
 
   it('registra a resposta e encurta o prazo quando responde antes dos últimos 15s', async () => {
-    mockMatchFindUnique
-      .mockResolvedValueOnce(matchRecord())
-      .mockResolvedValue(
-        matchRecord({
-          rounds: [roundRecord({ player1AnsweredAt: NOW, player1Score: 691 })],
-        }),
-      );
+    mockMatchFindUnique.mockResolvedValueOnce(matchRecord()).mockResolvedValue(
+      matchRecord({
+        rounds: [roundRecord({ player1AnsweredAt: NOW, player1Score: 691 })],
+      }),
+    );
     mockLocationFindUnique.mockResolvedValue({
       id: 'loc-1',
       latitude: 0,
@@ -758,6 +814,10 @@ describe('submitRankedAnswer', () => {
       .mockResolvedValueOnce(profileRecord())
       .mockResolvedValueOnce(
         profileRecord({ id: 'profile-2', userId: 'user-2' }),
+      )
+      .mockResolvedValueOnce(profileRecord())
+      .mockResolvedValueOnce(
+        profileRecord({ id: 'profile-2', userId: 'user-2' }),
       );
     mockTx.rankedProfile.update.mockResolvedValue({});
 
@@ -778,17 +838,50 @@ describe('submitRankedAnswer', () => {
     expect(finishUpdate.data).toMatchObject({
       status: 'FINISHED',
       winnerId: 'user-1',
-      player1RatingDelta: RATING_POINTS_PER_MATCH,
-      player2RatingDelta: -RATING_POINTS_PER_MATCH,
+      player1RatingDelta: ratingDelta(1200, 1200, 1),
+      player2RatingDelta: ratingDelta(1200, 1200, 0),
     });
 
     const winnerUpdate = mockTx.rankedProfile.update.mock.calls[0]?.[0] as {
       data: { rating: number; wins: { increment: number } };
     };
     expect(winnerUpdate.data).toMatchObject({
-      rating: 1200 + RATING_POINTS_PER_MATCH,
+      rating: 1200 + ratingDelta(1200, 1200, 1),
       wins: { increment: 1 },
     });
+  });
+
+  it('marca a partida como abandonada quando ninguém responde a rodada', async () => {
+    mockTx.rankedRound.findUnique.mockResolvedValue({
+      ...roundRecord({ deadline: new Date(NOW.getTime() - 1000) }),
+      match: {
+        id: 'match-1',
+        seasonId: 'season-1',
+        status: 'IN_PROGRESS',
+        player1Id: 'user-1',
+        player2Id: 'user-2',
+        player1Health: 5000,
+        player2Health: 5000,
+      },
+    });
+    mockTx.rankedRound.update.mockResolvedValue({});
+    mockTx.rankedMatch.update.mockResolvedValue({});
+
+    const result = await resolveRound('match-1', 1, NOW);
+
+    expect(mockTx.rankedRound.update).toHaveBeenCalledWith({
+      where: { id: 'round-1' },
+      data: expect.objectContaining({ resolvedAt: NOW }),
+    });
+    const abandonUpdate = mockTx.rankedMatch.update.mock.calls[0]?.[0] as {
+      data: { status: string; finishedAt: Date };
+    };
+    expect(abandonUpdate.data).toMatchObject({
+      status: 'ABANDONED',
+      finishedAt: NOW,
+    });
+    expect(mockTx.rankedProfile.update).not.toHaveBeenCalled();
+    expect(result).toEqual({ finished: true, winnerId: null, roundNumber: 1 });
   });
 });
 

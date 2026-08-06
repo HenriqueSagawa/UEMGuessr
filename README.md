@@ -477,7 +477,7 @@ O desafio diário oferece o **mesmo local para todos os jogadores** a cada 24h (
 <summary><b>🏆 <code>/ranked</code> — Modo ranqueado (1v1)</b></summary>
 <br/>
 
-Dois jogadores buscam a partida pela **fila de matchmaking** (pareados pela menor diferença de rating). Ambos recebem o **mesmo local** e têm 60s para responder; quem responde **antes dos últimos 15s** encurta o prazo do adversário para 15s. Cada um começa com **5000 de HP**; a diferença de pontos da rodada é convertida em dano **multiplicado por um fator crescente** (1.0, 1.5, 2.0, …). A partida tem número indeterminado de rodadas e termina quando o HP de um jogador zera. O vencedor ganha **+25 pontos** e o perdedor **−25 pontos**, movendo as divisões (Bronze I–III, Prata I–III, Ouro I–III, Platina I–III, Diamante I–III e Mestre). O ranking é **resetado a cada temporada**.
+Dois jogadores buscam a partida pela **fila de matchmaking** (pareados pela menor diferença de rating). Ambos recebem o **mesmo local** e têm 60s para responder; quem responde **antes dos últimos 15s** encurta o prazo do adversário para 15s. Cada um começa com **5000 de HP**; a diferença de pontos da rodada é convertida em dano **multiplicado por um fator crescente** (1.0, 1.5, 2.0, …). A partida tem número indeterminado de rodadas e termina quando o HP de um jogador zera. O rating usa **Elo** (K = 40): vencido o favorito ganha pouco, enquanto vencer um adversário mais forte rende mais pontos, movendo as divisões (Bronze I–III, Prata I–III, Ouro I–III, Platina I–III, Diamante I–III e Mestre). O ranking é **resetado a cada temporada**.
 
 | Método | Rota | Descrição | Proteção |
 |---|---|---|---|

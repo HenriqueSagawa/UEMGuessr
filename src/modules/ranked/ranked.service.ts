@@ -8,8 +8,8 @@ import {
   divisionLabel,
   EARLY_ANSWER_WINDOW_SECONDS,
   QUEUE_TTL_MS,
-  RATING_POINTS_PER_MATCH,
   ROUND_TIME_LIMIT_SECONDS,
+  ratingDelta,
   roundDamage,
   roundMultiplier,
 } from './ranked.lib';
@@ -22,6 +22,7 @@ type RankedTx = {
   rankedMatch: typeof prisma.rankedMatch;
   rankedRound: typeof prisma.rankedRound;
   rankedProfile: typeof prisma.rankedProfile;
+  rankedQueueEntry: typeof prisma.rankedQueueEntry;
   location: typeof prisma.location;
 };
 
@@ -244,6 +245,35 @@ function buildMatchStateDTO(
   };
 }
 
+async function computeRatingDeltas(
+  tx: RankedTx,
+  match: { seasonId: string; player1Id: string; player2Id: string },
+  winnerId: string,
+) {
+  const loserId =
+    winnerId === match.player1Id ? match.player2Id : match.player1Id;
+
+  const [winnerProfile, loserProfile] = await Promise.all([
+    tx.rankedProfile.findUnique({
+      where: {
+        userId_seasonId: { userId: winnerId, seasonId: match.seasonId },
+      },
+    }),
+    tx.rankedProfile.findUnique({
+      where: { userId_seasonId: { userId: loserId, seasonId: match.seasonId } },
+    }),
+  ]);
+  if (!winnerProfile || !loserProfile) return { p1Delta: 0, p2Delta: 0 };
+
+  const winnerDelta = ratingDelta(winnerProfile.rating, loserProfile.rating, 1);
+  const loserDelta = ratingDelta(loserProfile.rating, winnerProfile.rating, 0);
+
+  return {
+    p1Delta: match.player1Id === winnerId ? winnerDelta : loserDelta,
+    p2Delta: match.player1Id === winnerId ? loserDelta : winnerDelta,
+  };
+}
+
 async function applyRatingResult(
   tx: RankedTx,
   match: { seasonId: string; player1Id: string; player2Id: string },
@@ -264,11 +294,10 @@ async function applyRatingResult(
   ]);
   if (!winnerProfile || !loserProfile) return;
 
-  const winnerRating = winnerProfile.rating + RATING_POINTS_PER_MATCH;
-  const loserRating = Math.max(
-    0,
-    loserProfile.rating - RATING_POINTS_PER_MATCH,
-  );
+  const winnerDelta = ratingDelta(winnerProfile.rating, loserProfile.rating, 1);
+  const loserDelta = ratingDelta(loserProfile.rating, winnerProfile.rating, 0);
+  const winnerRating = Math.max(0, winnerProfile.rating + winnerDelta);
+  const loserRating = Math.max(0, loserProfile.rating + loserDelta);
 
   await tx.rankedProfile.update({
     where: { id: winnerProfile.id },
@@ -289,7 +318,11 @@ async function applyRatingResult(
   });
 }
 
-async function resolveRound(matchId: string, roundNumber: number, now: Date) {
+export async function resolveRound(
+  matchId: string,
+  roundNumber: number,
+  now: Date,
+) {
   return prisma.$transaction(async (tx) => {
     const round = await tx.rankedRound.findUnique({
       where: { matchId_roundNumber: { matchId, roundNumber } },
@@ -318,24 +351,37 @@ async function resolveRound(matchId: string, roundNumber: number, now: Date) {
         : match.player1Id
       : null;
 
+    // Nenhum jogador respondeu dentro do prazo: partida abandonada.
+    const abandoned =
+      round.player1AnsweredAt === null && round.player2AnsweredAt === null;
+
     await tx.rankedRound.update({
       where: { id: round.id },
       data: {
         resolvedAt: now,
-        player1Damage: p1Damage,
-        player2Damage: p2Damage,
+        ...(abandoned
+          ? {}
+          : { player1Damage: p1Damage, player2Damage: p2Damage }),
       },
     });
 
+    if (abandoned) {
+      await tx.rankedMatch.update({
+        where: { id: match.id },
+        data: {
+          status: 'ABANDONED',
+          finishedAt: now,
+        },
+      });
+      return { finished: true, winnerId: null, roundNumber };
+    }
+
     if (isOver) {
-      const p1Delta =
-        winnerId === match.player1Id
-          ? RATING_POINTS_PER_MATCH
-          : -RATING_POINTS_PER_MATCH;
-      const p2Delta =
-        winnerId === match.player2Id
-          ? RATING_POINTS_PER_MATCH
-          : -RATING_POINTS_PER_MATCH;
+      const { p1Delta, p2Delta } = await computeRatingDeltas(
+        tx,
+        match,
+        winnerId!,
+      );
 
       await tx.rankedMatch.update({
         where: { id: match.id },
@@ -418,6 +464,7 @@ async function matchWithBestOpponent(
       seasonId,
       status: 'WAITING',
       expiresAt: { gt: now },
+      userId: { not: joinerUserId },
       ...(excludeQueueId ? { id: { not: excludeQueueId } } : {}),
     },
     orderBy: { createdAt: 'asc' },
@@ -434,33 +481,68 @@ async function matchWithBestOpponent(
   }
   if (!best) return null;
 
-  const multiplier = roundMultiplier(1);
-  const location = await pickRandomLocation(prisma);
-  const match = await prisma.rankedMatch.create({
-    data: {
-      seasonId,
-      player1Id: best.userId,
-      player2Id: joinerUserId,
-      roundMultiplier: multiplier,
-      currentRoundNumber: 1,
-      rounds: {
-        create: {
-          roundNumber: 1,
-          locationId: location.id,
-          multiplier,
-          deadline: new Date(now.getTime() + ROUND_TIME_LIMIT_SECONDS * 1000),
+  const matchId = await prisma.$transaction(async (tx) => {
+    // Reserva atômica do candidato: apenas um request consegue alterar o status
+    // de WAITING para MATCHED. Se outro request venceu a corrida, count === 0.
+    const reservation = await tx.rankedQueueEntry.updateMany({
+      where: { id: best.id, status: 'WAITING' },
+      data: { status: 'MATCHED' },
+    });
+    if (reservation.count === 0) return null;
+
+    // Se o par já tem partida em andamento (pedido concorrente do oponente),
+    // não criamos duplicata: devolvemos a partida existente.
+    const existingMatch = await tx.rankedMatch.findFirst({
+      where: {
+        status: 'IN_PROGRESS',
+        OR: [
+          { player1Id: best.userId, player2Id: joinerUserId },
+          { player1Id: joinerUserId, player2Id: best.userId },
+        ],
+      },
+      select: { id: true },
+    });
+    if (existingMatch) return existingMatch.id;
+
+    const multiplier = roundMultiplier(1);
+    const location = await pickRandomLocation(tx);
+    const match = await tx.rankedMatch.create({
+      data: {
+        seasonId,
+        player1Id: best.userId,
+        player2Id: joinerUserId,
+        roundMultiplier: multiplier,
+        currentRoundNumber: 1,
+        rounds: {
+          create: {
+            roundNumber: 1,
+            locationId: location.id,
+            multiplier,
+            deadline: new Date(now.getTime() + ROUND_TIME_LIMIT_SECONDS * 1000),
+          },
         },
       },
-    },
-    select: { id: true },
+      select: { id: true },
+    });
+
+    await tx.rankedQueueEntry.update({
+      where: { id: best.id },
+      data: { matchedMatchId: match.id },
+    });
+
+    return match.id;
   });
 
-  await prisma.rankedQueueEntry.update({
-    where: { id: best.id },
-    data: { status: 'MATCHED', matchedMatchId: match.id },
-  });
+  if (matchId) return matchId;
 
-  return match.id;
+  // Outro request reservou o candidato primeiro: tenta novamente com os
+  // candidatos restantes (o candidato perdido não é mais WAITING).
+  return matchWithBestOpponent(
+    seasonId,
+    joinerUserId,
+    joinerRating,
+    excludeQueueId,
+  );
 }
 
 // ---------- Fila de matchmaking ----------
