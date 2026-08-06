@@ -15,6 +15,11 @@ jest.mock("../../../config/prisma", () => ({
       findFirst: jest.fn(),
       update: jest.fn(),
     },
+    passwordResetCode: {
+      create: jest.fn(),
+      findFirst: jest.fn(),
+      update: jest.fn(),
+    },
     refreshToken: {
       create: jest.fn(),
       findUnique: jest.fn(),
@@ -43,12 +48,16 @@ jest.mock("../../../lib/GoogleOAuth", () => ({
 
 jest.mock("../../../services/email.service", () => ({
   sendVerificationCodeEmail: jest.fn(),
+  sendPasswordResetCodeEmail: jest.fn(),
 }));
 
 import { hashValue, compareValue } from "../../../lib/hash";
 import { verifyRefreshToken } from "../../../lib/jwt";
 import { getGoogleUser } from "../../../lib/GoogleOAuth";
-import { sendVerificationCodeEmail } from "../../../services/email.service";
+import {
+  sendVerificationCodeEmail,
+  sendPasswordResetCodeEmail,
+} from "../../../services/email.service";
 
 const mockFindFirst = prisma.user.findFirst as jest.Mock;
 const mockFindUnique = prisma.user.findUnique as jest.Mock;
@@ -56,6 +65,9 @@ const mockUserCreate = prisma.user.create as jest.Mock;
 const mockUserUpdate = prisma.user.update as jest.Mock;
 const mockEmailCodeCreate = prisma.emailVerificationCode.create as jest.Mock;
 const mockEmailCodeFindFirst = prisma.emailVerificationCode.findFirst as jest.Mock;
+const mockResetCodeCreate = prisma.passwordResetCode.create as jest.Mock;
+const mockResetCodeFindFirst = prisma.passwordResetCode.findFirst as jest.Mock;
+const mockResetCodeUpdate = prisma.passwordResetCode.update as jest.Mock;
 const mockRefreshCreate = prisma.refreshToken.create as jest.Mock;
 const mockRefreshFindUnique = prisma.refreshToken.findUnique as jest.Mock;
 const mockRefreshUpdate = prisma.refreshToken.update as jest.Mock;
@@ -66,6 +78,7 @@ const mockVerifyRefresh = verifyRefreshToken as jest.Mock;
 const mockCompare = compareValue as jest.Mock;
 const mockGetGoogleUser = getGoogleUser as jest.Mock;
 const mockSendEmail = sendVerificationCodeEmail as jest.Mock;
+const mockSendResetEmail = sendPasswordResetCodeEmail as jest.Mock;
 
 const userRecord = (overrides: Record<string, unknown> = {}) => ({
   id: "user-1",
@@ -86,6 +99,9 @@ beforeEach(() => {
   mockUserUpdate.mockReset();
   mockEmailCodeCreate.mockReset();
   mockEmailCodeFindFirst.mockReset();
+  mockResetCodeCreate.mockReset();
+  mockResetCodeFindFirst.mockReset();
+  mockResetCodeUpdate.mockReset();
   mockRefreshCreate.mockReset();
   mockRefreshFindUnique.mockReset();
   mockRefreshUpdate.mockReset();
@@ -411,5 +427,116 @@ describe("loginWithGoogle", () => {
     mockGetGoogleUser.mockRejectedValue(new AppError("Falha no Google", 401));
 
     await expect(authService.loginWithGoogle("code")).rejects.toMatchObject({ statusCode: 401 });
+  });
+});
+
+describe("requestPasswordReset", () => {
+  it("não faz nada (nem envia email) se o email não existe", async () => {
+    mockFindUnique.mockResolvedValue(null);
+
+    await expect(authService.requestPasswordReset("nao-existe@uem.com")).resolves.toBeUndefined();
+
+    expect(mockResetCodeCreate).not.toHaveBeenCalled();
+    expect(mockSendResetEmail).not.toHaveBeenCalled();
+  });
+
+  it("não faz nada se a conta é de login com Google (sem senha)", async () => {
+    mockFindUnique.mockResolvedValue(userRecord({ password: null, provider: "GOOGLE" }));
+
+    await expect(authService.requestPasswordReset("g@uem.com")).resolves.toBeUndefined();
+
+    expect(mockResetCodeCreate).not.toHaveBeenCalled();
+    expect(mockSendResetEmail).not.toHaveBeenCalled();
+  });
+
+  it("gera um código com hash, salva e envia o email de redefinição", async () => {
+    mockFindUnique.mockResolvedValue(userRecord());
+    mockResetCodeCreate.mockResolvedValue({ id: "reset-1" });
+
+    await authService.requestPasswordReset("henrique@uem.com");
+
+    expect(mockResetCodeCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        userId: "user-1",
+        codeHash: expect.any(String),
+        expiresAt: expect.any(Date),
+      }),
+    });
+    expect(hashValue).toHaveBeenCalledWith(expect.stringMatching(/^\d{6}$/));
+    expect(mockSendResetEmail).toHaveBeenCalledTimes(1);
+    expect(mockSendResetEmail.mock.calls[0]?.[1]).toMatch(/^\d{6}$/);
+  });
+});
+
+describe("resetPassword", () => {
+  const input = {
+    email: "henrique@uem.com",
+    code: "123456",
+    newPassword: "NovaSenha1",
+  };
+
+  const pendingCode = { id: "reset-1", codeHash: "hashed:123456" };
+
+  it("lança 400 se o usuário não existe", async () => {
+    mockFindUnique.mockResolvedValue(null);
+
+    await expect(authService.resetPassword(input)).rejects.toMatchObject({
+      statusCode: 400,
+      message: "Código inválido ou expirado.",
+    });
+  });
+
+  it("lança 400 se a conta é de login com Google (sem senha)", async () => {
+    mockFindUnique.mockResolvedValue(userRecord({ password: null, provider: "GOOGLE" }));
+
+    await expect(authService.resetPassword(input)).rejects.toMatchObject({
+      statusCode: 400,
+      message: "Código inválido ou expirado.",
+    });
+  });
+
+  it("lança 400 se não existe código pendente", async () => {
+    mockFindUnique.mockResolvedValue(userRecord());
+    mockResetCodeFindFirst.mockResolvedValue(null);
+
+    await expect(authService.resetPassword(input)).rejects.toMatchObject({
+      statusCode: 400,
+      message: "Código inválido ou expirado.",
+    });
+  });
+
+  it("lança 400 se o código não confere", async () => {
+    mockFindUnique.mockResolvedValue(userRecord());
+    mockResetCodeFindFirst.mockResolvedValue(pendingCode);
+    mockCompare.mockResolvedValue(false);
+
+    await expect(authService.resetPassword(input)).rejects.toMatchObject({
+      statusCode: 400,
+      message: "Código inválido ou expirado.",
+    });
+  });
+
+  it("atualiza a senha, consome o código e revoga as sessões existentes", async () => {
+    mockFindUnique.mockResolvedValue(userRecord());
+    mockResetCodeFindFirst.mockResolvedValue(pendingCode);
+    mockCompare.mockResolvedValue(true);
+    mockTransaction.mockResolvedValue([{}, {}, { count: 1 }]);
+
+    await authService.resetPassword(input);
+
+    expect(hashValue).toHaveBeenCalledWith("NovaSenha1");
+    expect(mockUserUpdate).toHaveBeenCalledWith({
+      where: { id: "user-1" },
+      data: { password: "hashed:NovaSenha1" },
+    });
+    expect(mockResetCodeUpdate).toHaveBeenCalledWith({
+      where: { id: "reset-1" },
+      data: { consumedAt: expect.any(Date) },
+    });
+    expect(mockRefreshUpdateMany).toHaveBeenCalledWith({
+      where: { userId: "user-1", revokedAt: null },
+      data: { revokedAt: expect.any(Date) },
+    });
+    expect(mockTransaction).toHaveBeenCalledTimes(1);
   });
 });

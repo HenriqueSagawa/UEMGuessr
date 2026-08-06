@@ -5,10 +5,11 @@ import { generateSixDigitCode } from "../../utils/generateCode";
 import { hashValue, compareValue } from "../../lib/hash";
 import { signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken } from "../../lib/jwt";
 import { getGoogleUser } from "../../lib/GoogleOAuth";
-import { sendVerificationCodeEmail } from "../../services/email.service";
-import type { RegisterInput, LoginInput } from "./auth.schemas";
+import { sendVerificationCodeEmail, sendPasswordResetCodeEmail } from "../../services/email.service";
+import type { RegisterInput, LoginInput, ResetPasswordInput } from "./auth.schemas";
 
 const VERIFICATION_CODE_TTL_MS = 15 * 60 * 1000;
+const PASSWORD_RESET_TTL_MS = 15 * 60 * 1000;
 const REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 function publicUser(user: {
@@ -95,6 +96,58 @@ export async function resendVerificationCode(email: string) {
   if (!user || user.emailVerified) return;
  
   await issueVerificationCode(user.id, user.email);
+}
+
+export async function requestPasswordReset(email: string) {
+  const user = await prisma.user.findUnique({ where: { email } });
+
+  // Não revela se o email existe nem se a conta é de login com Google.
+  if (!user || !user.password) return;
+
+  await issuePasswordResetCode(user.id, user.email);
+}
+
+async function issuePasswordResetCode(userId: string, email: string) {
+  const code = generateSixDigitCode();
+
+  await prisma.passwordResetCode.create({
+    data: {
+      userId,
+      codeHash: await hashValue(code),
+      expiresAt: new Date(Date.now() + PASSWORD_RESET_TTL_MS),
+    },
+  });
+
+  await sendPasswordResetCodeEmail(email, code);
+}
+
+export async function resetPassword(input: ResetPasswordInput) {
+  const user = await prisma.user.findUnique({ where: { email: input.email } });
+  if (!user || !user.password) throw new AppError("Código inválido ou expirado.", 400);
+
+  const pendingCode = await prisma.passwordResetCode.findFirst({
+    where: { userId: user.id, consumedAt: null, expiresAt: { gt: new Date() } },
+    orderBy: { createdAt: "desc" },
+  });
+
+  if (!pendingCode) throw new AppError("Código inválido ou expirado.", 400);
+
+  const isValid = await compareValue(input.code, pendingCode.codeHash);
+  if (!isValid) throw new AppError("Código inválido ou expirado.", 400);
+
+  const passwordHash = await hashValue(input.newPassword);
+
+  await prisma.$transaction([
+    prisma.user.update({ where: { id: user.id }, data: { password: passwordHash } }),
+    prisma.passwordResetCode.update({
+      where: { id: pendingCode.id },
+      data: { consumedAt: new Date() },
+    }),
+    prisma.refreshToken.updateMany({
+      where: { userId: user.id, revokedAt: null },
+      data: { revokedAt: new Date() },
+    }),
+  ]);
 }
 
 export async function verifyEmail(email: string, code: string) {

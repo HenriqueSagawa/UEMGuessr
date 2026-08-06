@@ -57,6 +57,30 @@ export async function resendCode(req: Request, res: Response, next: NextFunction
   }
 }
 
+export async function forgotPassword(req: Request, res: Response, next: NextFunction) {
+  try {
+    await authService.requestPasswordReset(req.body.email);
+    return res.status(200).json({
+      status: "success",
+      message: "Se o email existir, um código de redefinição de senha foi enviado.",
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function resetPassword(req: Request, res: Response, next: NextFunction) {
+  try {
+    await authService.resetPassword(req.body);
+    return res.status(200).json({
+      status: "success",
+      message: "Senha redefinida com sucesso.",
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function login(req: Request, res: Response, next: NextFunction) {
   try {
     const { user, accessToken, refreshToken } = await authService.login(req.body);

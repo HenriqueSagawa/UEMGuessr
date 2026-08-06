@@ -22,3 +22,14 @@ export const authRateLimiter = rateLimit({
     message: "Muitas tentativas. Por favor, tente novamente em alguns minutos.",
   },
 });
+
+export const passwordResetRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    status: "error",
+    message: "Muitas tentativas de redefinição de senha. Tente novamente mais tarde.",
+  },
+});

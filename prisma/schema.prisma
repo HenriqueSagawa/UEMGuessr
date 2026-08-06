@@ -41,11 +41,25 @@ model User {
 
   games Game[]
   emailVerificationCodes EmailVerificationCode[]
+  passwordResetCodes     PasswordResetCode[]
   refreshTokens          RefreshToken[]
   locationsCreated       Location[]
 }
 
 model EmailVerificationCode {
+  id         String    @id @default(cuid())
+  userId     String
+  codeHash   String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model PasswordResetCode {
   id         String    @id @default(cuid())
   userId     String
   codeHash   String

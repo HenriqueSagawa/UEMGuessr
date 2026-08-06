@@ -1,12 +1,14 @@
 import { Router } from "express";
 import { validate } from "../../middlewares/validate";
 import { authenticate } from "../../middlewares/authenticate";
-import { authRateLimiter } from "../../middlewares/rateLimiter";
+import { authRateLimiter, passwordResetRateLimiter } from "../../middlewares/rateLimiter";
 import {
   registerSchema,
   loginSchema,
   verifyEmailSchema,
   resendCodeSchema,
+  forgotPasswordSchema,
+  resetPasswordSchema,
 } from "./auth.schemas";
 import * as authController from "./auth.controller";
 
@@ -16,6 +18,8 @@ router.post("/register", authRateLimiter, validate(registerSchema), authControll
 router.post("/verify-email", authRateLimiter, validate(verifyEmailSchema), authController.verifyEmail);
 router.post("/resend-code", authRateLimiter, validate(resendCodeSchema), authController.resendCode);
 router.post("/login", authRateLimiter, validate(loginSchema), authController.login);
+router.post("/forgot-password", passwordResetRateLimiter, validate(forgotPasswordSchema), authController.forgotPassword);
+router.post("/reset-password", passwordResetRateLimiter, validate(resetPasswordSchema), authController.resetPassword);
 router.post("/refresh", authController.refresh);
 router.post("/logout", authController.logout);
 router.get("/me", authenticate, authController.me);
