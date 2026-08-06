@@ -20,7 +20,7 @@ Adivinhe onde a foto foi tirada dentro do campus, acumule pontos com base na sua
 [![Repo size](https://img.shields.io/github/repo-size/HenriqueSagawa/UEMGuessr?style=flat-square&color=blueviolet)](https://github.com/HenriqueSagawa/UEMGuessr)
 [![Last commit](https://img.shields.io/github/last-commit/HenriqueSagawa/UEMGuessr?style=flat-square&color=success)](https://github.com/HenriqueSagawa/UEMGuessr/commits/main)
 [![Issues](https://img.shields.io/github/issues/HenriqueSagawa/UEMGuessr?style=flat-square&color=orange)](https://github.com/HenriqueSagawa/UEMGuessr/issues)
-[![License](https://img.shields.io/badge/license-Unlicensed-lightgrey?style=flat-square)](#-licença)
+[![License](https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square)](#-licença)
 
 <br/>
 
