@@ -1,9 +1,11 @@
 import { prisma } from '../../config/prisma';
 import { AppError } from '../../utils/appError';
 import { haversineDistanceMeters, calculateScore } from '../../lib/geo';
+import { rankedEvents } from '../../realtime/rankedEvents';
 import type { SubmitAnswerInput, CreateSeasonInput } from './ranked.schemas';
 import {
   BASE_RATING,
+  DIVISION_THRESHOLDS,
   divisionForRating,
   divisionLabel,
   EARLY_ANSWER_WINDOW_SECONDS,
@@ -150,6 +152,8 @@ function buildMatchStateDTO(
     player1Health: number;
     player2Health: number;
     winnerId: string | null;
+    player1RatingDelta: number | null;
+    player2RatingDelta: number | null;
     startedAt: Date;
     finishedAt: Date | null;
     player1: {
@@ -206,6 +210,12 @@ function buildMatchStateDTO(
       myHealth,
       opponentHealth,
       winnerId: match.winnerId,
+      myRatingDelta: isPlayer1
+        ? match.player1RatingDelta
+        : match.player2RatingDelta,
+      opponentRatingDelta: isPlayer1
+        ? match.player2RatingDelta
+        : match.player1RatingDelta,
       startedAt: match.startedAt,
       finishedAt: match.finishedAt,
     },
@@ -323,7 +333,9 @@ export async function resolveRound(
   roundNumber: number,
   now: Date,
 ) {
-  return prisma.$transaction(async (tx) => {
+  let player1Id = '';
+  let player2Id = '';
+  const result = await prisma.$transaction(async (tx) => {
     const round = await tx.rankedRound.findUnique({
       where: { matchId_roundNumber: { matchId, roundNumber } },
       include: { match: true },
@@ -332,6 +344,9 @@ export async function resolveRound(
 
     const match = round.match;
     if (match.status !== 'IN_PROGRESS') return null;
+
+    player1Id = match.player1Id;
+    player2Id = match.player2Id;
 
     const multiplier = Number(round.multiplier);
     const p1Score = round.player1Score ?? 0;
@@ -423,6 +438,19 @@ export async function resolveRound(
 
     return { finished: isOver, winnerId, roundNumber };
   });
+
+  if (result) {
+    rankedEvents.emitRoundResolved({
+      matchId,
+      roundNumber,
+      finished: result.finished,
+      winnerId: result.winnerId,
+      player1Id,
+      player2Id,
+    });
+  }
+
+  return result;
 }
 
 async function fetchMatch(matchId: string) {
@@ -481,7 +509,7 @@ async function matchWithBestOpponent(
   }
   if (!best) return null;
 
-  const matchId = await prisma.$transaction(async (tx) => {
+  const outcome = await prisma.$transaction(async (tx) => {
     // Reserva atômica do candidato: apenas um request consegue alterar o status
     // de WAITING para MATCHED. Se outro request venceu a corrida, count === 0.
     const reservation = await tx.rankedQueueEntry.updateMany({
@@ -500,9 +528,16 @@ async function matchWithBestOpponent(
           { player1Id: joinerUserId, player2Id: best.userId },
         ],
       },
-      select: { id: true },
+      select: { id: true, player1Id: true, player2Id: true },
     });
-    if (existingMatch) return existingMatch.id;
+    if (existingMatch) {
+      return {
+        matchId: existingMatch.id,
+        player1Id: existingMatch.player1Id,
+        player2Id: existingMatch.player2Id,
+        created: false,
+      };
+    }
 
     const multiplier = roundMultiplier(1);
     const location = await pickRandomLocation(tx);
@@ -522,7 +557,7 @@ async function matchWithBestOpponent(
           },
         },
       },
-      select: { id: true },
+      select: { id: true, player1Id: true, player2Id: true },
     });
 
     await tx.rankedQueueEntry.update({
@@ -530,10 +565,24 @@ async function matchWithBestOpponent(
       data: { matchedMatchId: match.id },
     });
 
-    return match.id;
+    return {
+      matchId: match.id,
+      player1Id: match.player1Id,
+      player2Id: match.player2Id,
+      created: true,
+    };
   });
 
-  if (matchId) return matchId;
+  if (outcome) {
+    if (outcome.created) {
+      rankedEvents.emitMatchCreated({
+        matchId: outcome.matchId,
+        player1Id: outcome.player1Id,
+        player2Id: outcome.player2Id,
+      });
+    }
+    return outcome.matchId;
+  }
 
   // Outro request reservou o candidato primeiro: tenta novamente com os
   // candidatos restantes (o candidato perdido não é mais WAITING).
@@ -601,10 +650,23 @@ export async function joinRankedQueue(userId: string) {
     return { status: 'matched', matchId: matched };
   }
 
+  rankedEvents.emitQueued({
+    userId,
+    queueId: entry.id,
+    rating: entry.rating,
+    expiresAt: entry.expiresAt,
+  });
+
   return { status: 'queued', queueId: entry.id };
 }
 
-export async function getRankedQueueStatus(userId: string) {
+export async function getRankedQueueStatus(
+  userId: string,
+): Promise<
+  | { status: 'matched'; matchId: string }
+  | { status: 'queued'; queueId: string; rating: number; expiresAt: Date }
+  | { status: 'not_queued' }
+> {
   const season = await getActiveSeason();
   const now = new Date();
 
@@ -642,10 +704,25 @@ export async function getRankedQueueStatus(userId: string) {
 
 export async function leaveRankedQueue(userId: string) {
   const season = await getActiveSeason();
-  await prisma.rankedQueueEntry.deleteMany({
+  const result = await prisma.rankedQueueEntry.deleteMany({
     where: { userId, seasonId: season.id, status: 'WAITING' },
   });
+  if (result.count > 0) {
+    rankedEvents.emitQueueLeft({ userId });
+  }
   return { status: 'left' };
+}
+
+export async function findUserActiveMatch(userId: string) {
+  const match = await prisma.rankedMatch.findFirst({
+    where: {
+      status: 'IN_PROGRESS',
+      OR: [{ player1Id: userId }, { player2Id: userId }],
+    },
+    select: { id: true },
+    orderBy: { startedAt: 'desc' },
+  });
+  return match?.id ?? null;
 }
 
 // ---------- Partida ----------
@@ -752,6 +829,13 @@ export async function submitRankedAnswer(
     },
   });
 
+  rankedEvents.emitRoundAnswered({
+    matchId,
+    roundNumber,
+    player1Id: match.player1Id,
+    player2Id: match.player2Id,
+  });
+
   const opponentAnswered = isPlayer1
     ? !!round.player2AnsweredAt
     : !!round.player1AnsweredAt;
@@ -836,6 +920,188 @@ export async function getRankedLeaderboard(userId: string, limit: number) {
       wins: myProfile.wins,
       losses: myProfile.losses,
     },
+  };
+}
+
+// ---------- Estatísticas ----------
+
+export async function getSeasonStats(seasonId?: string) {
+  const season = seasonId
+    ? await prisma.season.findUnique({ where: { id: seasonId } })
+    : await getActiveSeason();
+  if (!season) throw new AppError('Temporada não encontrada.', 404);
+
+  const [divisionGroups, players, totalMatches, finishedMatches, abandonedMatches, ratingAgg, top] =
+    await Promise.all([
+      prisma.rankedProfile.groupBy({
+        by: ['division'],
+        where: { seasonId: season.id },
+        _count: { _all: true },
+      }),
+      prisma.rankedProfile.count({ where: { seasonId: season.id } }),
+      prisma.rankedMatch.count({ where: { seasonId: season.id } }),
+      prisma.rankedMatch.count({
+        where: { seasonId: season.id, status: 'FINISHED' },
+      }),
+      prisma.rankedMatch.count({
+        where: { seasonId: season.id, status: 'ABANDONED' },
+      }),
+      prisma.rankedProfile.aggregate({
+        where: { seasonId: season.id },
+        _avg: { rating: true },
+        _max: { bestRating: true },
+      }),
+      prisma.rankedProfile.findFirst({
+        where: { seasonId: season.id },
+        orderBy: [{ rating: 'desc' }, { wins: 'desc' }, { losses: 'asc' }],
+        include: { user: USER_PUBLIC_SELECT },
+      }),
+    ]);
+
+  const byDivision = DIVISION_THRESHOLDS.map((tier) => {
+    const group = divisionGroups.find((g) => g.division === tier.division);
+    return {
+      division: tier.division,
+      divisionLabel: tier.label,
+      players: group?._count._all ?? 0,
+    };
+  }).filter((entry) => entry.players > 0);
+
+  return {
+    season: {
+      id: season.id,
+      name: season.name,
+      status: season.status,
+      startsAt: season.startsAt,
+      endsAt: season.endsAt,
+    },
+    totals: {
+      players,
+      totalMatches,
+      finishedMatches,
+      abandonedMatches,
+      inProgressMatches: totalMatches - finishedMatches - abandonedMatches,
+      averageRating:
+        ratingAgg._avg.rating != null ? Math.round(ratingAgg._avg.rating) : null,
+      topBestRating: ratingAgg._max.bestRating ?? null,
+    },
+    byDivision,
+    top: top
+      ? {
+          userId: top.userId,
+          username: top.user.username,
+          displayName: top.user.displayName,
+          avatarUrl: top.user.avatarUrl,
+          rating: top.rating,
+          division: top.division,
+          divisionLabel: divisionLabel(top.division),
+          wins: top.wins,
+          losses: top.losses,
+        }
+      : null,
+  };
+}
+
+export async function getUserStats(userId: string) {
+  const season = await getActiveSeason();
+  const profile = await ensureProfile(userId, season.id);
+  const totalMatches = profile.wins + profile.losses;
+
+  const recentMatches = await prisma.rankedMatch.findMany({
+    where: {
+      seasonId: season.id,
+      status: 'FINISHED',
+      winnerId: { not: null },
+      OR: [{ player1Id: userId }, { player2Id: userId }],
+    },
+    orderBy: { finishedAt: 'desc' },
+    take: 100,
+    select: { winnerId: true },
+  });
+
+  let currentStreak = 0;
+  for (const match of recentMatches) {
+    const isWin = match.winnerId === userId;
+    if (currentStreak === 0) {
+      currentStreak = isWin ? 1 : -1;
+    } else if ((currentStreak > 0) === isWin) {
+      currentStreak = isWin ? currentStreak + 1 : currentStreak - 1;
+    } else {
+      break;
+    }
+  }
+
+  const betterCount = await prisma.rankedProfile.count({
+    where: { seasonId: season.id, rating: { gt: profile.rating } },
+  });
+
+  return {
+    season: { id: season.id, name: season.name },
+    profile: {
+      rank: betterCount + 1,
+      rating: profile.rating,
+      division: profile.division,
+      divisionLabel: divisionLabel(profile.division),
+      wins: profile.wins,
+      losses: profile.losses,
+      totalMatches,
+      winRate: totalMatches > 0 ? profile.wins / totalMatches : 0,
+      bestRating: profile.bestRating,
+      currentStreak: {
+        direction:
+          currentStreak === 0 ? 'none' : currentStreak > 0 ? 'win' : 'loss',
+        count: Math.abs(currentStreak),
+      },
+    },
+  };
+}
+
+export async function getUserMatchHistory(userId: string, limit: number) {
+  const season = await getActiveSeason();
+
+  const matches = await prisma.rankedMatch.findMany({
+    where: {
+      seasonId: season.id,
+      OR: [{ player1Id: userId }, { player2Id: userId }],
+    },
+    orderBy: { startedAt: 'desc' },
+    take: limit,
+    include: {
+      player1: USER_PUBLIC_SELECT,
+      player2: USER_PUBLIC_SELECT,
+    },
+  });
+
+  return {
+    season: { id: season.id, name: season.name },
+    matches: matches.map((match) => {
+      const isPlayer1 = match.player1Id === userId;
+      const opponent = isPlayer1 ? match.player2 : match.player1;
+      const myRatingDelta = isPlayer1
+        ? match.player1RatingDelta
+        : match.player2RatingDelta;
+      return {
+        matchId: match.id,
+        status: match.status,
+        result:
+          match.status === 'FINISHED'
+            ? match.winnerId === userId
+              ? 'win'
+              : 'loss'
+            : match.status === 'ABANDONED'
+              ? 'abandoned'
+              : 'in_progress',
+        myRatingDelta,
+        opponent: {
+          id: opponent.id,
+          username: opponent.username,
+          displayName: opponent.displayName,
+          avatarUrl: opponent.avatarUrl,
+        },
+        startedAt: match.startedAt,
+        finishedAt: match.finishedAt,
+      };
+    }),
   };
 }
 

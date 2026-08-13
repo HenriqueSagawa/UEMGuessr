@@ -48,7 +48,7 @@ Adivinhe onde a foto foi tirada dentro do campus, acumule pontos com base na sua
 
 ## 📖 Sobre o projeto
 
-**UEMGuessr** é uma API REST que dá vida a um jogo no estilo **GeoGuessr**, só que ambientado inteiramente dentro do campus da **Universidade Estadual de Maringá (UEM))**. O jogador recebe a foto de um local do campus, precisa "chutar" onde aquilo fica em um mapa e ganha pontos proporcionais à precisão do palpite.
+**UEMGuessr** é uma API **REST + tempo real (socket.io)** que dá vida a um jogo no estilo **GeoGuessr**, só que ambientado inteiramente dentro do campus da **Universidade Estadual de Maringá (UEM))**. O jogador recebe a foto de um local do campus, precisa "chutar" onde aquilo fica em um mapa e ganha pontos proporcionais à precisão do palpite.
 
 O projeto nasceu como um estudo aprofundado de **arquitetura de APIs em Node.js/TypeScript**, e hoje já conta com autenticação completa, upload de imagens, um sistema de pontuação geoespacial e uma suíte de testes automatizados cobrindo as regras de negócio mais sensíveis.
 
@@ -134,7 +134,7 @@ flowchart LR
 | Camada | Tecnologias |
 |---|---|
 | **Linguagem** | ![TypeScript](https://img.shields.io/badge/-TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white) |
-| **Runtime & Framework** | ![Node.js](https://img.shields.io/badge/-Node.js-339933?style=flat-square&logo=node.js&logoColor=white) ![Express](https://img.shields.io/badge/-Express_5-000000?style=flat-square&logo=express&logoColor=white) |
+| **Runtime & Framework** | ![Node.js](https://img.shields.io/badge/-Node.js-339933?style=flat-square&logo=node.js&logoColor=white) ![Express](https://img.shields.io/badge/-Express_5-000000?style=flat-square&logo=express&logoColor=white) ![socket.io](https://img.shields.io/badge/-socket.io-010101?style=flat-square&logo=socket.io&logoColor=white) |
 | **Banco de dados** | ![PostgreSQL](https://img.shields.io/badge/-PostgreSQL-4169E1?style=flat-square&logo=postgresql&logoColor=white) ![Prisma](https://img.shields.io/badge/-Prisma_ORM-2D3748?style=flat-square&logo=prisma&logoColor=white) |
 | **Autenticação** | JWT (`jsonwebtoken`) · `bcryptjs` · Google OAuth 2.0 |
 | **Upload de mídia** | ![Cloudinary](https://img.shields.io/badge/-Cloudinary-3448C5?style=flat-square&logo=cloudinary&logoColor=white) + `multer` |
@@ -479,16 +479,17 @@ O desafio diário oferece o **mesmo local para todos os jogadores** a cada 24h (
 
 Dois jogadores buscam a partida pela **fila de matchmaking** (pareados pela menor diferença de rating). Ambos recebem o **mesmo local** e têm 60s para responder; quem responde **antes dos últimos 15s** encurta o prazo do adversário para 15s. Cada um começa com **5000 de HP**; a diferença de pontos da rodada é convertida em dano **multiplicado por um fator crescente** (1.0, 1.5, 2.0, …). A partida tem número indeterminado de rodadas e termina quando o HP de um jogador zera. O rating usa **Elo** (K = 40): vencido o favorito ganha pouco, enquanto vencer um adversário mais forte rende mais pontos, movendo as divisões (Bronze I–III, Prata I–III, Ouro I–III, Platina I–III, Diamante I–III e Mestre). O ranking é **resetado a cada temporada**.
 
+> **Jogabilidade em tempo real:** a fila (entrar, esperar, parear, sair) e o duelo em si (locais, palpites, dano, fim da partida) acontecem **via socket.io** — veja a [seção de tempo real](#-real-time-socketio) abaixo. As rotas REST abaixo atendem perfis, ranking, histórico e estatísticas.
+
 | Método | Rota | Descrição | Proteção |
 |---|---|---|---|
 | `GET` | `/ranked/me` | Perfil ranqueado do usuário na temporada atual (rating, divisão, wins/losses) | 🔒 JWT |
 | `GET` | `/ranked/season/current` | Temporada ativa + perfil do usuário | 🔒 JWT |
 | `GET` | `/ranked/leaderboard` | Ranking dos melhores jogadores da temporada | 🔒 JWT |
-| `POST` | `/ranked/queue/join` | Entra na fila de matchmaking (retorna `matched` ou `queued`) | 🔒 JWT |
-| `GET` | `/ranked/queue/status` | Consulta a fila (retorna o `matchId` quando encontrado) | 🔒 JWT |
-| `POST` | `/ranked/queue/leave` | Sai da fila de espera | 🔒 JWT |
-| `GET` | `/ranked/matches/:id` | Estado da partida (rodada atual, locais, prazos, resultado da última rodada) | 🔒 JWT |
-| `POST` | `/ranked/matches/:id/rounds/:roundNumber/answer` | Envia o palpite (lat/lng) da rodada atual | 🔒 JWT |
+| `GET` | `/ranked/me/stats` | Estatísticas do usuário (win rate, sequência, posição) | 🔒 JWT |
+| `GET` | `/ranked/me/matches` | Histórico de partidas do usuário | 🔒 JWT |
+| `GET` | `/ranked/stats` | Totalizações da temporada (jogadores, partidas, divisões) | 🔒 JWT |
+| `GET` | `/ranked/presence` | Jogadores online (socket.io conectados) e na fila | 🔒 JWT |
 | `POST` | `/ranked/seasons` | Cria/encerra temporadas (reset do ranking) | 🔒 Admin |
 | `POST` | `/ranked/seasons/current/end` | Encerra a temporada ativa manualmente | 🔒 Admin |
 | `GET` | `/ranked/seasons` | Lista temporadas | 🔒 Admin |
@@ -497,6 +498,57 @@ Dois jogadores buscam a partida pela **fila de matchmaking** (pareados pela meno
 > **Divisões:** os pontos movem o jogador entre as faixas (ex.: Bronze III 0–399, Prata III 1200–1599, Mestre 6000+).
 
 </details>
+
+<br/>
+
+### ⚡ Real-time (socket.io)
+
+A jogabilidade online do modo ranqueado roda sobre **socket.io** (namespace `/ranked`, anexado ao mesmo servidor HTTP). A autenticação é feita no handshake com o **JWT de acesso**:
+
+```ts
+import { io } from 'socket.io-client';
+
+const socket = io('https://api.exemplo.com', {
+  path: '/socket.io',
+  transports: ['websocket'],
+  auth: { token: accessToken }, // ou ?token= na URL
+});
+
+socket.on('connect', () => {
+  socket.emit('queue:join');
+});
+```
+
+**Eventos do cliente → servidor:**
+
+| Evento | Payload | Descrição |
+|---|---|---|
+| `queue:join` | — | Entra na fila de matchmaking |
+| `queue:cancel` | — | Sai da fila de espera |
+| `queue:status` | — | Consulta o status atual da fila |
+| `match:state` | `{ matchId }` | Solicita o estado completo da partida (reconexão/sincronização) |
+| `match:answer` | `{ matchId, roundNumber, guessLatitude, guessLongitude }` | Envia o palpite da rodada atual |
+| `dev:ping` | — | Mantém a presença ativa (heartbeat); responde `dev:pong` |
+
+**Eventos do servidor → cliente:**
+
+| Evento | Payload | Descrição |
+|---|---|---|
+| `welcome` | `{ user, timestamp }` | Handshake concluído |
+| `presence:update` | `{ playersOnline, playersInQueue }` | Atualização ao vivo de jogadores online e na fila |
+| `queue:joining` | `{ queueId, rating, expiresAt }` | Você está na fila |
+| `queue:status` | `{ status, queueId?, rating?, expiresAt?, matchId? }` | Resposta da consulta de fila |
+| `queue:canceled` | `{ status: 'left' }` | Você saiu da fila |
+| `match:found` | estado da partida | Oponente encontrado / partida em andamento |
+| `match:state` | estado da partida | Resposta da solicitação de estado |
+| `match:answered` | estado da partida | Alguém respondeu a rodada (atualiza prazo/indicador) |
+| `match:round` | estado da partida | Rodada resolvida e/ou próxima rodada iniciada |
+| `match:finished` | estado da partida | Partida encerrada (`match.winnerId`, deltas de rating) |
+| `error` | `{ code, message }` | Erro de negócio (códigos compatíveis com a API REST) |
+
+O **estado da partida** retornado nos eventos é o mesmo DTO da rotas de leitura, e inclui a rodada atual (`currentRound`), o histórico (`history`), o último resultado (`lastResult`) e os deltas de rating após o término (`match.myRatingDelta`/`opponentRatingDelta`).
+
+Na conexão, o servidor **sincroniza automaticamente** o estado do usuário: se houver partida `IN_PROGRESS` ou fila pendente, o cliente recebe `match:found` ou `queue:status` sem precisar pedir. O servidor também **agenda timers por partida** que resolvem a rodada exatamente no `deadline` (o ajuste do prazo de 15s é aplicado no `match:answered`), com o job de limpeza periódico atuando como rede de segurança.
 
 <details>
 <summary><b>❤️ <code>/health</code> — Healthcheck</b></summary>
@@ -629,6 +681,7 @@ npm test
 - [x] Sistema de ranking/Elo entre jogadores
 - [x] Desafio diário
 - [x] Modo ranqueado (matchmaking 1v1, divisões e temporadas)
+- [x] Jogabilidade ranqueada em tempo real com socket.io (fila + partidas + presença "X jogadores online")
 - [ ] Frontend web definitivo (Next.js)
 - [ ] Documentação interativa da API (Swagger/OpenAPI)
 

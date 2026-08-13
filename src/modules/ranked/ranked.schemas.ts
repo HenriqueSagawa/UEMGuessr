@@ -24,8 +24,16 @@ export const leaderboardQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
 });
 
-export const roundNumberParamSchema = z.coerce.number().int().min(1);
+export const seasonStatsQuerySchema = z.object({
+  seasonId: z.string().trim().min(1).optional(),
+});
+
+export const matchHistoryQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});
 
 export type SubmitAnswerInput = z.infer<typeof submitAnswerSchema>;
 export type CreateSeasonInput = z.infer<typeof createSeasonSchema>;
 export type LeaderboardQuery = z.infer<typeof leaderboardQuerySchema>;
+export type SeasonStatsQuery = z.infer<typeof seasonStatsQuerySchema>;
+export type MatchHistoryQuery = z.infer<typeof matchHistoryQuerySchema>;

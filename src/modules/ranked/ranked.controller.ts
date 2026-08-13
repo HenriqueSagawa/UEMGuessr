@@ -3,8 +3,10 @@ import { AppError } from '../../utils/appError';
 import {
   createSeasonSchema,
   leaderboardQuerySchema,
-  roundNumberParamSchema,
+  matchHistoryQuerySchema,
+  seasonStatsQuerySchema,
 } from './ranked.schemas';
+import { rankedSocketHub } from '../../realtime/rankedSocket';
 import * as rankedService from './ranked.service';
 
 function requireUserId(req: Request): string {
@@ -12,75 +14,15 @@ function requireUserId(req: Request): string {
   return req.user.id;
 }
 
-export async function joinQueue(
-  req: Request,
+export async function presence(
+  _req: Request,
   res: Response,
   next: NextFunction,
 ) {
   try {
-    const result = await rankedService.joinRankedQueue(requireUserId(req));
-    return res.status(201).json({ status: 'success', data: result });
-  } catch (error) {
-    next(error);
-  }
-}
-
-export async function queueStatus(
-  req: Request,
-  res: Response,
-  next: NextFunction,
-) {
-  try {
-    const result = await rankedService.getRankedQueueStatus(requireUserId(req));
+    const result = await rankedSocketHub.getPresence();
     return res.status(200).json({ status: 'success', data: result });
   } catch (error) {
-    next(error);
-  }
-}
-
-export async function leaveQueue(
-  req: Request,
-  res: Response,
-  next: NextFunction,
-) {
-  try {
-    const result = await rankedService.leaveRankedQueue(requireUserId(req));
-    return res.status(200).json({ status: 'success', data: result });
-  } catch (error) {
-    next(error);
-  }
-}
-
-export async function getMatch(
-  req: Request,
-  res: Response,
-  next: NextFunction,
-) {
-  try {
-    const match = await rankedService.getRankedMatch(
-      req.params.id as string,
-      requireUserId(req),
-    );
-    return res.status(200).json({ status: 'success', data: match });
-  } catch (error) {
-    next(error);
-  }
-}
-
-export async function answer(req: Request, res: Response, next: NextFunction) {
-  try {
-    const roundNumber = roundNumberParamSchema.parse(req.params.roundNumber);
-    const result = await rankedService.submitRankedAnswer(
-      req.params.id as string,
-      requireUserId(req),
-      roundNumber,
-      req.body,
-    );
-    return res.status(201).json({ status: 'success', data: result });
-  } catch (error) {
-    if (error instanceof Error && error.name === 'ZodError') {
-      return next(new AppError('Número da rodada inválido.', 422));
-    }
     next(error);
   }
 }
@@ -90,6 +32,56 @@ export async function me(req: Request, res: Response, next: NextFunction) {
     const result = await rankedService.getRankedProfile(requireUserId(req));
     return res.status(200).json({ status: 'success', data: result });
   } catch (error) {
+    next(error);
+  }
+}
+
+export async function myStats(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const result = await rankedService.getUserStats(requireUserId(req));
+    return res.status(200).json({ status: 'success', data: result });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function matchHistory(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const query = matchHistoryQuerySchema.parse(req.query);
+    const result = await rankedService.getUserMatchHistory(
+      requireUserId(req),
+      query.limit,
+    );
+    return res.status(200).json({ status: 'success', data: result });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'ZodError') {
+      return next(new AppError('Parâmetros de paginação inválidos.', 422));
+    }
+    next(error);
+  }
+}
+
+export async function seasonStats(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const query = seasonStatsQuerySchema.parse(req.query);
+    const result = await rankedService.getSeasonStats(query.seasonId);
+    return res.status(200).json({ status: 'success', data: result });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'ZodError') {
+      return next(new AppError('Parâmetros inválidos.', 422));
+    }
     next(error);
   }
 }

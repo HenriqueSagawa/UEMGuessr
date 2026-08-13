@@ -11,6 +11,7 @@ import { rateLimiter } from './middlewares/rateLimiter';
 import { errorHandler } from './middlewares/errorHandler';
 import routes from './routes';
 import { startRankedCleanup, stopRankedCleanup } from './jobs/rankedCleanup';
+import { rankedSocketHub } from './realtime/rankedSocket';
 
 const app = express();
 
@@ -34,6 +35,7 @@ const server = app.listen(env.PORT, () => {
   logger.info(
     `Servidor rodando na porta ${env.PORT} em modo [${env.NODE_ENV}]`,
   );
+  rankedSocketHub.attach(server);
   startRankedCleanup();
 });
 
@@ -43,6 +45,7 @@ async function gracefulShutdown(signal: string) {
   );
 
   stopRankedCleanup();
+  rankedSocketHub.stop();
 
   server.close(async () => {
     logger.info('Servidor HTTP encerrado.');

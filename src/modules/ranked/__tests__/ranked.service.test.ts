@@ -3,6 +3,7 @@ import {
   EARLY_ANSWER_WINDOW_SECONDS,
   ratingDelta,
 } from '../ranked.lib';
+import { rankedEvents } from '../../../realtime/rankedEvents';
 import {
   getActiveSeason,
   joinRankedQueue,
@@ -12,6 +13,9 @@ import {
   submitRankedAnswer,
   getRankedProfile,
   getRankedLeaderboard,
+  getSeasonStats,
+  getUserStats,
+  getUserMatchHistory,
   createSeason,
   endCurrentSeason,
   resolveRound,
@@ -22,6 +26,7 @@ jest.mock('../../../config/prisma', () => ({
   prisma: {
     season: {
       findFirst: jest.fn(),
+      findUnique: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
       count: jest.fn(),
@@ -29,17 +34,22 @@ jest.mock('../../../config/prisma', () => ({
     },
     rankedProfile: {
       findUnique: jest.fn(),
+      findFirst: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
       findMany: jest.fn(),
       count: jest.fn(),
+      groupBy: jest.fn(),
+      aggregate: jest.fn(),
     },
     rankedMatch: {
       create: jest.fn(),
       findUnique: jest.fn(),
       findFirst: jest.fn(),
+      findMany: jest.fn(),
       update: jest.fn(),
       updateMany: jest.fn(),
+      count: jest.fn(),
     },
     rankedRound: {
       findUnique: jest.fn(),
@@ -65,19 +75,25 @@ jest.mock('../../../config/prisma', () => ({
 }));
 
 const mockSeasonFindFirst = prisma.season.findFirst as jest.Mock;
+const mockSeasonFindUnique = prisma.season.findUnique as jest.Mock;
 const mockSeasonCreate = prisma.season.create as jest.Mock;
 const mockSeasonUpdate = prisma.season.update as jest.Mock;
 const mockSeasonCount = prisma.season.count as jest.Mock;
 const mockProfileFindUnique = prisma.rankedProfile.findUnique as jest.Mock;
+const mockProfileFindFirst = prisma.rankedProfile.findFirst as jest.Mock;
 const mockProfileCreate = prisma.rankedProfile.create as jest.Mock;
 const mockProfileUpdate = prisma.rankedProfile.update as jest.Mock;
 const mockProfileFindMany = prisma.rankedProfile.findMany as jest.Mock;
 const mockProfileCount = prisma.rankedProfile.count as jest.Mock;
+const mockProfileGroupBy = prisma.rankedProfile.groupBy as jest.Mock;
+const mockProfileAggregate = prisma.rankedProfile.aggregate as jest.Mock;
 const mockMatchCreate = prisma.rankedMatch.create as jest.Mock;
 const mockMatchFindUnique = prisma.rankedMatch.findUnique as jest.Mock;
 const mockMatchFindFirst = prisma.rankedMatch.findFirst as jest.Mock;
+const mockMatchFindMany = prisma.rankedMatch.findMany as jest.Mock;
 const mockMatchUpdate = prisma.rankedMatch.update as jest.Mock;
 const mockMatchUpdateMany = prisma.rankedMatch.updateMany as jest.Mock;
+const mockMatchCount = prisma.rankedMatch.count as jest.Mock;
 const mockRoundFindUnique = prisma.rankedRound.findUnique as jest.Mock;
 const mockRoundCreate = prisma.rankedRound.create as jest.Mock;
 const mockRoundUpdate = prisma.rankedRound.update as jest.Mock;
@@ -945,6 +961,172 @@ describe('getRankedLeaderboard', () => {
   });
 });
 
+describe('getSeasonStats', () => {
+  it('retorna totalizações, distribuição por divisão e top da temporada ativa', async () => {
+    mockSeasonFindFirst.mockResolvedValue(seasonRecord());
+    mockProfileGroupBy.mockResolvedValue([
+      { division: 'PRATA_III', _count: { _all: 12 } },
+      { division: 'OURO_I', _count: { _all: 1 } },
+    ]);
+    mockProfileCount.mockResolvedValue(13);
+    mockMatchCount
+      .mockResolvedValueOnce(20)
+      .mockResolvedValueOnce(18)
+      .mockResolvedValueOnce(1);
+    mockProfileAggregate.mockResolvedValue({
+      _avg: { rating: 1215.5 },
+      _max: { bestRating: 1800 },
+    });
+    mockProfileFindFirst.mockResolvedValue({
+      ...profileRecord({ rating: 1800, wins: 5, division: 'OURO_I' }),
+      user: {
+        id: 'user-a',
+        username: 'alice',
+        displayName: null,
+        avatarUrl: null,
+      },
+    });
+
+    const result = await getSeasonStats();
+
+    expect(result.season).toMatchObject({ id: 'season-1', name: 'Temporada 1' });
+    expect(result.totals).toMatchObject({
+      players: 13,
+      totalMatches: 20,
+      finishedMatches: 18,
+      abandonedMatches: 1,
+      inProgressMatches: 1,
+      averageRating: 1216,
+      topBestRating: 1800,
+    });
+    expect(result.byDivision).toEqual([
+      { division: 'PRATA_III', divisionLabel: 'Prata III', players: 12 },
+      { division: 'OURO_I', divisionLabel: 'Ouro I', players: 1 },
+    ]);
+    expect(result.top).toMatchObject({
+      username: 'alice',
+      rating: 1800,
+      divisionLabel: 'Ouro I',
+      wins: 5,
+    });
+  });
+
+  it('aceita seasonId explícito e lança 404 se a temporada não existe', async () => {
+    mockSeasonFindUnique.mockResolvedValue(
+      seasonRecord({ id: 'season-2', name: 'Temporada 2', status: 'ENDED' }),
+    );
+
+    await expect(getSeasonStats('season-2')).resolves.toMatchObject({
+      season: { id: 'season-2' },
+    });
+
+    mockSeasonFindUnique.mockResolvedValueOnce(null);
+    await expect(getSeasonStats('season-x')).rejects.toMatchObject({
+      statusCode: 404,
+    });
+  });
+});
+
+describe('getUserStats', () => {
+  it('retorna vitórias/derrotas, taxa, sequência e posição do usuário', async () => {
+    mockSeasonFindFirst.mockResolvedValue(seasonRecord());
+    mockProfileFindUnique.mockResolvedValue(
+      profileRecord({ rating: 1350, wins: 3, losses: 1, bestRating: 1400 }),
+    );
+    mockMatchFindMany.mockResolvedValue([
+      { winnerId: 'user-1' },
+      { winnerId: 'user-1' },
+      { winnerId: 'user-1' },
+    ]);
+    mockProfileCount.mockResolvedValue(4);
+
+    const result = await getUserStats('user-1');
+
+    expect(result.profile).toMatchObject({
+      rank: 5,
+      rating: 1350,
+      wins: 3,
+      losses: 1,
+      totalMatches: 4,
+      winRate: 0.75,
+      bestRating: 1400,
+    });
+    expect(result.profile.currentStreak).toEqual({
+      direction: 'win',
+      count: 3,
+    });
+  });
+
+  it('quebra a sequência ao encontrar o primeiro resultado contrário', async () => {
+    mockSeasonFindFirst.mockResolvedValue(seasonRecord());
+    mockProfileFindUnique.mockResolvedValue(profileRecord());
+    mockMatchFindMany.mockResolvedValue([
+      { winnerId: 'user-1' },
+      { winnerId: 'user-2' },
+      { winnerId: 'user-2' },
+    ]);
+    mockProfileCount.mockResolvedValue(0);
+
+    const result = await getUserStats('user-1');
+
+    expect(result.profile.currentStreak).toEqual({ direction: 'win', count: 1 });
+  });
+});
+
+describe('getUserMatchHistory', () => {
+  it('retorna o histórico com oponente, resultado e delta de rating', async () => {
+    mockSeasonFindFirst.mockResolvedValue(seasonRecord());
+    mockMatchFindMany.mockResolvedValue([
+      matchRecord({
+        status: 'FINISHED',
+        winnerId: 'user-1',
+        player1RatingDelta: 12,
+        player2RatingDelta: -12,
+        finishedAt: NOW,
+      }),
+    ]);
+
+    const result = await getUserMatchHistory('user-1', 20);
+
+    expect(mockMatchFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          seasonId: 'season-1',
+          OR: [{ player1Id: 'user-1' }, { player2Id: 'user-1' }],
+        },
+        orderBy: { startedAt: 'desc' },
+        take: 20,
+      }),
+    );
+    expect(result.matches[0]).toMatchObject({
+      matchId: 'match-1',
+      status: 'FINISHED',
+      result: 'win',
+      myRatingDelta: 12,
+      opponent: { username: 'bob' },
+      finishedAt: NOW,
+    });
+  });
+
+  it('relata derrota e abandono quando o usuário não venceu', async () => {
+    mockSeasonFindFirst.mockResolvedValue(seasonRecord());
+    mockMatchFindMany.mockResolvedValue([
+      matchRecord({
+        status: 'FINISHED',
+        winnerId: 'user-2',
+        player1RatingDelta: -12,
+        player2RatingDelta: 12,
+      }),
+      matchRecord({ status: 'ABANDONED', winnerId: null }),
+    ]);
+
+    const result = await getUserMatchHistory('user-1', 20);
+
+    expect(result.matches[0]).toMatchObject({ result: 'loss' });
+    expect(result.matches[1]).toMatchObject({ result: 'abandoned' });
+  });
+});
+
 describe('createSeason / endCurrentSeason', () => {
   it('cria a primeira temporada quando não há ativa', async () => {
     mockSeasonFindFirst.mockResolvedValue(null);
@@ -989,5 +1171,151 @@ describe('createSeason / endCurrentSeason', () => {
     mockSeasonFindFirst.mockResolvedValue(null);
 
     await expect(endCurrentSeason()).rejects.toMatchObject({ statusCode: 409 });
+  });
+});
+
+describe('eventos do domínio ranqueado (realtime)', () => {
+  it('emite match-created ao parear imediatamente', async () => {
+    const spy = jest.spyOn(rankedEvents, 'emitMatchCreated');
+    mockSeasonFindFirst.mockResolvedValue(seasonRecord());
+    mockProfileFindUnique.mockResolvedValue(profileRecord());
+    mockMatchFindFirst.mockResolvedValue(null);
+    mockQueueDeleteMany.mockResolvedValue({ count: 0 });
+    mockQueueFindMany.mockResolvedValue([queueEntryRecord({ id: 'q2' })]);
+    mockTx.rankedQueueEntry.updateMany.mockResolvedValue({ count: 1 });
+    mockTx.rankedMatch.findFirst.mockResolvedValue(null);
+    mockTx.location.count.mockResolvedValue(1);
+    mockTx.location.findFirst.mockResolvedValue({
+      id: 'loc-1',
+      latitude: 0,
+      longitude: 0,
+    });
+    mockTx.rankedMatch.create.mockResolvedValue({
+      id: 'match-1',
+      player1Id: 'user-2',
+      player2Id: 'user-1',
+    });
+    mockTx.rankedQueueEntry.update.mockResolvedValue({});
+
+    await joinRankedQueue('user-1');
+
+    expect(spy).toHaveBeenCalledWith({
+      matchId: 'match-1',
+      player1Id: 'user-2',
+      player2Id: 'user-1',
+    });
+  });
+
+  it('emite queued quando não há oponente na fila', async () => {
+    const spy = jest.spyOn(rankedEvents, 'emitQueued');
+    mockSeasonFindFirst.mockResolvedValue(seasonRecord());
+    mockProfileFindUnique.mockResolvedValue(profileRecord());
+    mockMatchFindFirst.mockResolvedValue(null);
+    mockQueueDeleteMany.mockResolvedValue({ count: 0 });
+    mockQueueFindMany.mockResolvedValue([]);
+    mockQueueCreate.mockResolvedValue(
+      queueEntryRecord({ id: 'queue-1', userId: 'user-1', rating: 1200 }),
+    );
+
+    await joinRankedQueue('user-1');
+
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'user-1',
+        queueId: 'queue-1',
+        rating: 1200,
+      }),
+    );
+  });
+
+  it('emite queue-left ao sair da fila', async () => {
+    const spy = jest.spyOn(rankedEvents, 'emitQueueLeft');
+    mockSeasonFindFirst.mockResolvedValue(seasonRecord());
+    mockQueueDeleteMany.mockResolvedValue({ count: 1 });
+
+    await leaveRankedQueue('user-1');
+
+    expect(spy).toHaveBeenCalledWith({ userId: 'user-1' });
+  });
+
+  it('não emite queue-left quando não havia entrada na fila', async () => {
+    const spy = jest.spyOn(rankedEvents, 'emitQueueLeft');
+    mockSeasonFindFirst.mockResolvedValue(seasonRecord());
+    mockQueueDeleteMany.mockResolvedValue({ count: 0 });
+
+    await leaveRankedQueue('user-1');
+
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('emite round-answered ao registrar um palpite', async () => {
+    const spy = jest.spyOn(rankedEvents, 'emitRoundAnswered');
+    mockMatchFindUnique
+      .mockResolvedValueOnce(matchRecord())
+      .mockResolvedValue(
+        matchRecord({
+          rounds: [roundRecord({ player1AnsweredAt: NOW, player1Score: 691 })],
+        }),
+      );
+    mockLocationFindUnique.mockResolvedValue({
+      id: 'loc-1',
+      latitude: 0,
+      longitude: 0,
+    });
+    mockRoundUpdate.mockResolvedValue(roundRecord({ player1AnsweredAt: NOW }));
+
+    await submitRankedAnswer('match-1', 'user-1', 1, {
+      guessLatitude: 0,
+      guessLongitude: 0,
+    });
+
+    expect(spy).toHaveBeenCalledWith({
+      matchId: 'match-1',
+      roundNumber: 1,
+      player1Id: 'user-1',
+      player2Id: 'user-2',
+    });
+  });
+
+  it('emite round-resolved ao resolver uma rodada em andamento', async () => {
+    const spy = jest.spyOn(rankedEvents, 'emitRoundResolved');
+    mockTx.rankedRound.findUnique.mockResolvedValue({
+      ...roundRecord(),
+      player1AnsweredAt: NOW,
+      player1Score: 1000,
+      player2AnsweredAt: NOW,
+      player2Score: 100,
+      match: {
+        id: 'match-1',
+        seasonId: 'season-1',
+        status: 'IN_PROGRESS',
+        player1Id: 'user-1',
+        player2Id: 'user-2',
+        player1Health: 5000,
+        player2Health: 5000,
+      },
+    });
+    mockTx.rankedRound.update.mockResolvedValue({});
+    mockTx.location.count.mockResolvedValue(1);
+    mockTx.location.findFirst.mockResolvedValue({
+      id: 'loc-2',
+      latitude: 1,
+      longitude: 1,
+    });
+    mockTx.rankedMatch.update.mockResolvedValue({});
+    mockTx.rankedRound.create.mockResolvedValue({});
+
+    await resolveRound('match-1', 1, NOW);
+
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        matchId: 'match-1',
+        roundNumber: 1,
+        finished: false,
+        winnerId: null,
+        player1Id: 'user-1',
+        player2Id: 'user-2',
+      }),
+    );
   });
 });
