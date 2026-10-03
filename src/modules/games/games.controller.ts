@@ -44,6 +44,7 @@ export async function getById(req: Request, res: Response, next: NextFunction) {
 export async function nextRound(req: Request, res: Response, next: NextFunction) {
   try {
     const round = await gamesService.getNextRound(req.params.id as string, requireUserId(req));
+    res.setHeader('Cache-Control', 'no-store');
     return res.status(200).json({ status: "success", data: round });
   } catch (error) {
     next(error);

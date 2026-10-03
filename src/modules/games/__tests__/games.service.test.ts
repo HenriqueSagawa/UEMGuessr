@@ -20,6 +20,7 @@ jest.mock("../../../config/prisma", () => ({
       findMany: jest.fn(),
     },
     $transaction: jest.fn(),
+    $queryRaw: jest.fn(),
   },
 }));
 
@@ -39,6 +40,7 @@ const gameRecord = (overrides: Record<string, unknown> = {}) => ({
   id: "game-1",
   userId: "user-1",
   score: 0,
+  pendingLocationId: null,
   startedAt: new Date("2026-01-01T00:00:00Z"),
   finishedAt: null,
   ...overrides,
@@ -57,6 +59,11 @@ beforeEach(() => {
   mockLocationFindUnique.mockReset();
   mockLocationFindMany.mockReset();
   mockTransaction.mockReset();
+  mockTransaction.mockImplementation(async (arg: unknown) =>
+    typeof arg === 'function'
+      ? (arg as (tx: typeof prisma) => unknown)(prisma)
+      : arg,
+  );
   jest.restoreAllMocks();
 });
 
@@ -163,15 +170,43 @@ describe("getNextRound", () => {
     expect(result.roundNumber).toBe(3);
     expect(result.totalRounds).toBe(TOTAL_ROUNDS_PER_GAME);
     expect(result.location).toEqual({ id: "loc-a", imageUrl: "http://img/a.jpg" });
+    expect(mockGameUpdate).toHaveBeenCalledWith({
+      where: { id: 'game-1' },
+      data: { pendingLocationId: 'loc-a' },
+    });
+  });
+
+  it("reutiliza o local já sorteado ao consultar a rodada novamente", async () => {
+    mockGameFindUnique.mockResolvedValue(gameRecord({ pendingLocationId: 'loc-a' }));
+    mockRoundCount.mockResolvedValue(0);
+    mockLocationFindUnique.mockResolvedValue({ id: 'loc-a', imageUrl: 'http://img/a.jpg' });
+
+    const first = await getNextRound('game-1', 'user-1');
+    const second = await getNextRound('game-1', 'user-1');
+
+    expect(first.location).toEqual(second.location);
+    expect(mockLocationFindMany).not.toHaveBeenCalled();
+    expect(mockGameUpdate).not.toHaveBeenCalled();
   });
 });
 
 describe("submitGuess", () => {
   const location = { id: "loc-1", latitude: 0, longitude: 0 };
   const input = { locationId: "loc-1", guessLatitude: 0.001, guessLongitude: 0 };
+  const pendingGame = (overrides: Record<string, unknown> = {}) =>
+    gameRecord({ pendingLocationId: 'loc-1', ...overrides });
+
+  it('rejeita um local escolhido pelo cliente sem sorteio', async () => {
+    mockGameFindUnique.mockResolvedValue(pendingGame());
+
+    await expect(submitGuess('game-1', 'user-1', {
+      ...input, locationId: 'loc-outro',
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(mockRoundCreate).not.toHaveBeenCalled();
+  });
 
   it("lança 409 se a partida já foi finalizada", async () => {
-    mockGameFindUnique.mockResolvedValue(gameRecord({ finishedAt: new Date() }));
+    mockGameFindUnique.mockResolvedValue(pendingGame({ finishedAt: new Date() }));
 
     await expect(submitGuess("game-1", "user-1", input)).rejects.toMatchObject({
       statusCode: 409,
@@ -179,7 +214,7 @@ describe("submitGuess", () => {
   });
 
   it("lança 404 se o local não existe", async () => {
-    mockGameFindUnique.mockResolvedValue(gameRecord());
+    mockGameFindUnique.mockResolvedValue(pendingGame());
     mockLocationFindUnique.mockResolvedValue(null);
 
     await expect(submitGuess("game-1", "user-1", input)).rejects.toMatchObject({
@@ -189,7 +224,7 @@ describe("submitGuess", () => {
   });
 
   it("lança 409 se já atingiu o número máximo de rodadas", async () => {
-    mockGameFindUnique.mockResolvedValue(gameRecord());
+    mockGameFindUnique.mockResolvedValue(pendingGame());
     mockLocationFindUnique.mockResolvedValue(location);
     mockRoundCount.mockResolvedValue(TOTAL_ROUNDS_PER_GAME);
 
@@ -197,10 +232,10 @@ describe("submitGuess", () => {
   });
 
   it("lança 409 se o local já foi usado na partida (P2002)", async () => {
-    mockGameFindUnique.mockResolvedValue(gameRecord());
+    mockGameFindUnique.mockResolvedValue(pendingGame());
     mockLocationFindUnique.mockResolvedValue(location);
     mockRoundCount.mockResolvedValue(0);
-    mockTransaction.mockRejectedValue({ code: "P2002" });
+    mockRoundCreate.mockRejectedValue({ code: "P2002" });
 
     await expect(submitGuess("game-1", "user-1", input)).rejects.toMatchObject({
       statusCode: 409,
@@ -209,10 +244,10 @@ describe("submitGuess", () => {
   });
 
   it("lança 409 quando o roundNumber é duplicado por concorrência (P2002)", async () => {
-    mockGameFindUnique.mockResolvedValue(gameRecord());
+    mockGameFindUnique.mockResolvedValue(pendingGame());
     mockLocationFindUnique.mockResolvedValue(location);
     mockRoundCount.mockResolvedValue(0);
-    mockTransaction.mockRejectedValue({
+    mockRoundCreate.mockRejectedValue({
       code: "P2002",
       meta: { target: ["gameId", "roundNumber"] },
     });
@@ -224,23 +259,15 @@ describe("submitGuess", () => {
   });
 
   it("calcula distância e pontuação e registra a rodada", async () => {
-    mockGameFindUnique.mockResolvedValue(gameRecord());
+    mockGameFindUnique.mockResolvedValue(pendingGame());
     mockLocationFindUnique.mockResolvedValue(location);
     mockRoundCount.mockResolvedValue(0);
-    mockTransaction.mockResolvedValue([
-      {
-        id: "round-1",
-        gameId: "game-1",
-        locationId: "loc-1",
-        roundNumber: 1,
-        guessLatitude: input.guessLatitude,
-        guessLongitude: input.guessLongitude,
-        distanceMeters: 111.2,
-        score: 691,
-      },
-      gameRecord({ score: 691 }),
-    ]);
-    mockGameFindUniqueOrThrow.mockResolvedValue(gameRecord({ score: 691 }));
+    mockRoundCreate.mockResolvedValue({
+      id: "round-1", gameId: "game-1", locationId: "loc-1",
+      roundNumber: 1, guessLatitude: input.guessLatitude,
+      guessLongitude: input.guessLongitude, distanceMeters: 111.2, score: 691,
+    });
+    mockGameUpdate.mockResolvedValue(gameRecord({ score: 691 }));
 
     const result = await submitGuess("game-1", "user-1", input);
 
@@ -253,18 +280,14 @@ describe("submitGuess", () => {
   });
 
   it("finaliza a partida automaticamente na última rodada", async () => {
-    mockGameFindUnique.mockResolvedValue(gameRecord());
+    mockGameFindUnique.mockResolvedValue(pendingGame());
     mockLocationFindUnique.mockResolvedValue(location);
     mockRoundCount.mockResolvedValue(TOTAL_ROUNDS_PER_GAME - 1);
-    mockTransaction.mockResolvedValue([
-      { id: "round-5", roundNumber: TOTAL_ROUNDS_PER_GAME, distanceMeters: 0, score: 1000, guessLatitude: 0, guessLongitude: 0 },
-      gameRecord({ score: 2000, finishedAt: new Date() }),
-    ]);
-    mockGameFindUniqueOrThrow.mockResolvedValue(gameRecord({ score: 2000, finishedAt: new Date() }));
+    mockRoundCreate.mockResolvedValue({ id: "round-5", roundNumber: TOTAL_ROUNDS_PER_GAME, distanceMeters: 0, score: 1000, guessLatitude: 0, guessLongitude: 0 });
+    mockGameUpdate.mockResolvedValue(gameRecord({ score: 2000, finishedAt: new Date() }));
 
     const result = await submitGuess("game-1", "user-1", { locationId: "loc-1", guessLatitude: 0, guessLongitude: 0 });
 
-    expect(mockGameFindUniqueOrThrow).toHaveBeenCalled();
     expect(mockGameUpdate).toHaveBeenCalledWith({
       where: { id: "game-1" },
       data: expect.objectContaining({
@@ -294,7 +317,7 @@ describe("finishGame", () => {
 
     expect(mockGameUpdate).toHaveBeenCalledWith({
       where: { id: "game-1" },
-      data: { finishedAt: expect.any(Date) },
+      data: { finishedAt: expect.any(Date), pendingLocationId: null },
     });
     expect(result.roundsPlayed).toBe(3);
     expect(result.score).toBe(900);

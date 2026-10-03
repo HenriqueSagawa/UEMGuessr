@@ -61,76 +61,72 @@ export async function getGameById(gameId: string, userId: string) {
 }
 
 export async function getNextRound(gameId: string, userId: string) {
-  const game = await ensureOwnedGame(gameId, userId);
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "Game" WHERE id = ${gameId} FOR UPDATE`;
+    const game = await tx.game.findUnique({ where: { id: gameId } });
+    if (!game || game.userId !== userId) throw new AppError("Partida não encontrada.", 404);
+    if (game.finishedAt) throw new AppError("Esta partida já foi finalizada.", 409);
 
-  if (game.finishedAt) {
-    throw new AppError("Esta partida já foi finalizada.", 409);
-  }
+    const playedCount = await tx.round.count({ where: { gameId } });
+    if (playedCount >= TOTAL_ROUNDS_PER_GAME) {
+      throw new AppError("Esta partida já atingiu o número máximo de rodadas. Finalize a partida.", 409);
+    }
 
-  const playedCount = await prisma.round.count({ where: { gameId } });
+    let location = game.pendingLocationId
+      ? await tx.location.findUnique({
+          where: { id: game.pendingLocationId },
+          select: { id: true, imageUrl: true },
+        })
+      : null;
+    if (!location) {
+      const availableLocations = await tx.location.findMany({
+        where: { rounds: { none: { gameId } } },
+        select: { id: true, imageUrl: true },
+      });
+      if (availableLocations.length === 0) {
+        throw new AppError("Não há locais suficientes cadastrados para continuar esta partida.", 409);
+      }
+      location = availableLocations[Math.floor(Math.random() * availableLocations.length)]!;
+      await tx.game.update({
+        where: { id: gameId },
+        data: { pendingLocationId: location.id },
+      });
+    }
 
-  if (playedCount >= TOTAL_ROUNDS_PER_GAME) {
-    throw new AppError(
-      "Esta partida já atingiu o número máximo de rodadas. Finalize a partida.",
-      409,
-    );
-  }
-
-  const availableLocations = await prisma.location.findMany({
-    where: { rounds: { none: { gameId } } },
-    select: { id: true, imageUrl: true },
+    return {
+      roundNumber: playedCount + 1,
+      totalRounds: TOTAL_ROUNDS_PER_GAME,
+      location: { id: location.id, imageUrl: location.imageUrl },
+    };
   });
-
-  if (availableLocations.length === 0) {
-    throw new AppError(
-      "Não há locais suficientes cadastrados para continuar esta partida.",
-      409,
-    );
-  }
-
-  const randomIndex = Math.floor(Math.random() * availableLocations.length);
-  const location = availableLocations[randomIndex]!;
-
-  return {
-    roundNumber: playedCount + 1,
-    totalRounds: TOTAL_ROUNDS_PER_GAME,
-    location: { id: location.id, imageUrl: location.imageUrl },
-  };
 }
 
 export async function submitGuess(gameId: string, userId: string, input: SubmitGuessInput) {
-  const game = await ensureOwnedGame(gameId, userId);
-
-  if (game.finishedAt) {
-    throw new AppError("Esta partida já foi finalizada.", 409);
-  }
-
-  const location = await prisma.location.findUnique({ where: { id: input.locationId } });
-  if (!location) throw new AppError("Local não encontrado.", 404);
-
-  const playedCount = await prisma.round.count({ where: { gameId } });
-  if (playedCount >= TOTAL_ROUNDS_PER_GAME) {
-    throw new AppError(
-      "Esta partida já atingiu o número máximo de rodadas. Finalize a partida.",
-      409,
-    );
-  }
-
-  const distanceMeters = haversineDistanceMeters(
-    input.guessLatitude,
-    input.guessLongitude,
-    Number(location.latitude),
-    Number(location.longitude),
-  );
-
-  const score = calculateScore(distanceMeters);
-  const roundNumber = playedCount + 1;
-  const isLastRound = roundNumber >= TOTAL_ROUNDS_PER_GAME;
-
-  let round;
+  let result;
   try {
-    [round] = await prisma.$transaction([
-      prisma.round.create({
+    result = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Game" WHERE id = ${gameId} FOR UPDATE`;
+      const game = await tx.game.findUnique({ where: { id: gameId } });
+      if (!game || game.userId !== userId) throw new AppError("Partida não encontrada.", 404);
+      if (game.finishedAt) throw new AppError("Esta partida já foi finalizada.", 409);
+      if (!game.pendingLocationId || game.pendingLocationId !== input.locationId) {
+        throw new AppError("Este local não foi sorteado para a rodada atual.", 409);
+      }
+      const location = await tx.location.findUnique({ where: { id: game.pendingLocationId } });
+      if (!location) throw new AppError("Local não encontrado.", 404);
+      const playedCount = await tx.round.count({ where: { gameId } });
+      if (playedCount >= TOTAL_ROUNDS_PER_GAME) {
+        throw new AppError("Esta partida já atingiu o número máximo de rodadas. Finalize a partida.", 409);
+      }
+      const distanceMeters = haversineDistanceMeters(
+        input.guessLatitude,
+        input.guessLongitude,
+        Number(location.latitude),
+        Number(location.longitude),
+      );
+      const score = calculateScore(distanceMeters);
+      const roundNumber = playedCount + 1;
+      const round = await tx.round.create({
         data: {
           gameId,
           locationId: input.locationId,
@@ -140,15 +136,17 @@ export async function submitGuess(gameId: string, userId: string, input: SubmitG
           distanceMeters,
           score,
         },
-      }),
-      prisma.game.update({
+      });
+      const updatedGame = await tx.game.update({
         where: { id: gameId },
         data: {
           score: { increment: score },
-          ...(isLastRound && { finishedAt: new Date() }),
+          pendingLocationId: null,
+          ...(roundNumber >= TOTAL_ROUNDS_PER_GAME && { finishedAt: new Date() }),
         },
-      }),
-    ]);
+      });
+      return { round, updatedGame, location, roundNumber };
+    });
   } catch (error: unknown) {
     if (typeof error === "object" && error !== null && "code" in error && error.code === "P2002") {
       const target = (error as { meta?: { target?: string[] } }).meta?.target;
@@ -163,7 +161,7 @@ export async function submitGuess(gameId: string, userId: string, input: SubmitG
     throw error;
   }
 
-  const updatedGame = await prisma.game.findUniqueOrThrow({ where: { id: gameId } });
+  const { round, updatedGame, location, roundNumber } = result;
 
   return {
     round: {
@@ -184,25 +182,25 @@ export async function submitGuess(gameId: string, userId: string, input: SubmitG
 }
 
 export async function finishGame(gameId: string, userId: string) {
-  const game = await ensureOwnedGame(gameId, userId);
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "Game" WHERE id = ${gameId} FOR UPDATE`;
+    const game = await tx.game.findUnique({ where: { id: gameId } });
+    if (!game || game.userId !== userId) throw new AppError("Partida não encontrada.", 404);
+    if (game.finishedAt) throw new AppError("Esta partida já foi finalizada.", 409);
 
-  if (game.finishedAt) {
-    throw new AppError("Esta partida já foi finalizada.", 409);
-  }
+    const roundsPlayed = await tx.round.count({ where: { gameId } });
+    const updated = await tx.game.update({
+      where: { id: gameId },
+      data: { finishedAt: new Date(), pendingLocationId: null },
+    });
 
-  const roundsPlayed = await prisma.round.count({ where: { gameId } });
-
-  const updated = await prisma.game.update({
-    where: { id: gameId },
-    data: { finishedAt: new Date() },
+    return {
+      id: updated.id,
+      score: updated.score,
+      startedAt: updated.startedAt,
+      finishedAt: updated.finishedAt,
+      roundsPlayed,
+      totalRounds: TOTAL_ROUNDS_PER_GAME,
+    };
   });
-
-  return {
-    id: updated.id,
-    score: updated.score,
-    startedAt: updated.startedAt,
-    finishedAt: updated.finishedAt,
-    roundsPlayed,
-    totalRounds: TOTAL_ROUNDS_PER_GAME,
-  };
 }
