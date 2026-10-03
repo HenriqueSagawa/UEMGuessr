@@ -5,9 +5,14 @@ import { AppError } from "../../utils/appError";
 jest.mock("../../lib/jwt", () => ({
   verifyAccessToken: jest.fn(),
 }));
+jest.mock("../../config/prisma", () => ({
+  prisma: { user: { findUnique: jest.fn() } },
+}));
 
 import { verifyAccessToken } from "../../lib/jwt";
+import { prisma } from "../../config/prisma";
 const mockVerify = jest.mocked(verifyAccessToken);
+const mockFindUser = jest.mocked(prisma.user.findUnique);
 
 function mockRes() {
   return {} as Response;
@@ -90,13 +95,24 @@ describe("requireRole", () => {
     expect(err.statusCode).toBe(403);
   });
 
-  it("chama next() sem erro quando o papel é permitido", () => {
+  it("chama next() sem erro quando o papel atual no banco é permitido", async () => {
     const req = { user: { id: "u1", role: "ADMIN" } } as Request;
     const next = jest.fn();
+    mockFindUser.mockResolvedValue({ role: "ADMIN" } as never);
 
-    requireRole("ADMIN", "MODERATOR")(req, mockRes(), next);
+    await requireRole("ADMIN", "MODERATOR")(req, mockRes(), next);
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(next).toHaveBeenCalledWith();
+  });
+
+  it("rejeita um token de admin após a remoção da permissão", async () => {
+    const req = { user: { id: "u1", role: "ADMIN" } } as Request;
+    const next = jest.fn();
+    mockFindUser.mockResolvedValue({ role: "USER" } as never);
+
+    await requireRole("ADMIN")(req, mockRes(), next);
+
+    expect((next.mock.calls[0]?.[0] as AppError).statusCode).toBe(403);
   });
 });

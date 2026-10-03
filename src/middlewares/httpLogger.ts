@@ -5,7 +5,9 @@ export function httpLogger(req: Request, res: Response, next: NextFunction) {
 
   res.on('finish', () => {
     const duration = (performance.now() - startTime).toFixed(1);
-    const { method, originalUrl } = req;
+    const { method } = req;
+    // A query pode conter o código OAuth e outros segredos temporários.
+    const path = req.originalUrl.split('?', 1)[0];
     const { statusCode } = res;
 
     const color =
@@ -21,7 +23,7 @@ export function httpLogger(req: Request, res: Response, next: NextFunction) {
     const bold = '\x1b[1m';
 
     console.log(
-      ` ${bold}${method}${reset} ${originalUrl} ${color}${statusCode}${reset} in ${duration}ms`
+      ` ${bold}${method}${reset} ${path} ${color}${statusCode}${reset} in ${duration}ms`
     );
   });
 
