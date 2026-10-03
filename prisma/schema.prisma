@@ -146,6 +146,7 @@ model Location {
   createdAt DateTime @default(now())
 
   rounds          Round[]
+  pendingGames    Game[] @relation("PendingGameLocation")
   dailyChallenges DailyChallenge[]
   rankedRounds    RankedRound[]
 }
@@ -156,13 +157,17 @@ model Game {
   userId String
 
   score Int @default(0)
+  pendingLocationId String?
 
   startedAt  DateTime  @default(now())
   finishedAt DateTime?
 
   user User @relation(fields: [userId], references: [id])
+  pendingLocation Location? @relation("PendingGameLocation", fields: [pendingLocationId], references: [id], onDelete: SetNull)
 
   rounds Round[]
+
+  @@index([pendingLocationId])
 }
 
 model Round {
@@ -287,6 +292,7 @@ model RankedMatch {
   @@index([player1Id])
   @@index([player2Id])
   @@index([status])
+  @@index([seasonId, status])
 }
 
 model RankedRound {
@@ -318,6 +324,7 @@ model RankedRound {
 
   @@unique([matchId, roundNumber])
   @@index([matchId, resolvedAt])
+  @@index([resolvedAt, deadline])
 }
 
 model RankedQueueEntry {
@@ -335,6 +342,7 @@ model RankedQueueEntry {
   match  RankedMatch? @relation(fields: [matchedMatchId], references: [id])
 
   @@index([seasonId, status])
+  @@index([seasonId, status, expiresAt])
   @@index([userId])
   @@index([expiresAt])
 }
