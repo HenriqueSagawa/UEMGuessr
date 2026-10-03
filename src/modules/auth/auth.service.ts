@@ -210,7 +210,7 @@ export async function refreshTokens(refreshToken: string) {
  
   const stored = await prisma.refreshToken.findUnique({ where: { id: payload.jti } });
  
-  if (!stored || stored.revokedAt || stored.expiresAt < new Date()) {
+  if (!stored || stored.userId !== payload.sub || stored.revokedAt || stored.expiresAt < new Date()) {
     throw new AppError("Refresh token inválido ou expirado.", 401);
   }
  
@@ -226,7 +226,13 @@ export async function refreshTokens(refreshToken: string) {
   const user = await prisma.user.findUnique({ where: { id: stored.userId } });
   if (!user) throw new AppError("Usuário não encontrado.", 401);
  
-  await prisma.refreshToken.update({ where: { id: stored.id }, data: { revokedAt: new Date() } });
+  const revoked = await prisma.refreshToken.updateMany({
+    where: { id: stored.id, revokedAt: null, expiresAt: { gt: new Date() } },
+    data: { revokedAt: new Date() },
+  });
+  if (revoked.count !== 1) {
+    throw new AppError("Refresh token inválido ou expirado.", 401);
+  }
   const tokens = await issueTokenPair(user.id, user.role);
  
   return { user: publicUser(user), ...tokens };

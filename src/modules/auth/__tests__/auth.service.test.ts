@@ -323,18 +323,33 @@ describe("refreshTokens", () => {
     mockRefreshFindUnique.mockResolvedValue(stored);
     mockCompare.mockResolvedValue(true);
     mockFindUnique.mockResolvedValue(userRecord({ emailVerified: true }));
-    mockRefreshUpdate.mockResolvedValue({ ...stored, revokedAt: new Date() });
+    mockRefreshUpdateMany.mockResolvedValue({ count: 1 });
     mockRefreshCreate.mockResolvedValue({ id: "rt-2" });
 
     const result = await authService.refreshTokens("refresh-token");
 
-    expect(mockRefreshUpdate).toHaveBeenCalledWith({
-      where: { id: "rt-1" },
+    expect(mockRefreshUpdateMany).toHaveBeenCalledWith({
+      where: { id: "rt-1", revokedAt: null, expiresAt: { gt: expect.any(Date) } },
       data: { revokedAt: expect.any(Date) },
     });
     expect(mockRefreshCreate).toHaveBeenCalledTimes(1);
     expect(result.accessToken).toBe("access-token");
     expect(result.refreshToken).toBe("refresh-token");
+  });
+
+  it("impede reutilizar o mesmo refresh token em pedidos concorrentes", async () => {
+    mockVerifyRefresh.mockReturnValue({ sub: "user-1", jti: "rt-1", tokenType: "refresh" });
+    mockRefreshFindUnique.mockResolvedValue(stored);
+    mockCompare.mockResolvedValue(true);
+    mockFindUnique.mockResolvedValue(userRecord({ emailVerified: true }));
+    mockRefreshUpdateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
+    mockRefreshCreate.mockResolvedValue({ id: "rt-2" });
+
+    await authService.refreshTokens("refresh-token");
+    await expect(authService.refreshTokens("refresh-token")).rejects.toMatchObject({
+      statusCode: 401,
+    });
+    expect(mockRefreshCreate).toHaveBeenCalledTimes(1);
   });
 });
 
