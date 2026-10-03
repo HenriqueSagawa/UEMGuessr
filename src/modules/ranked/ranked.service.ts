@@ -21,12 +21,26 @@ const USER_PUBLIC_SELECT = {
 } as const;
 
 type RankedTx = {
+  $queryRaw: typeof prisma.$queryRaw;
   rankedMatch: typeof prisma.rankedMatch;
   rankedRound: typeof prisma.rankedRound;
   rankedProfile: typeof prisma.rankedProfile;
   rankedQueueEntry: typeof prisma.rankedQueueEntry;
   location: typeof prisma.location;
+  season: typeof prisma.season;
 };
+
+// A linha da partida é o ponto de serialização para respostas, resolução e
+// encerramento. O lock vale entre processos e termina junto da transação.
+async function lockMatch(tx: RankedTx, matchId: string) {
+  await tx.$queryRaw`SELECT id FROM "RankedMatch" WHERE id = ${matchId} FOR UPDATE`;
+}
+
+async function lockMatchmakingUsers(tx: RankedTx, userIds: string[]) {
+  for (const userId of [...userIds].sort()) {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${userId}, 0))`;
+  }
+}
 
 function isPrismaUniqueViolation(error: unknown): boolean {
   return (
@@ -84,8 +98,13 @@ async function pickRandomLocation(
   db: { location: typeof prisma.location },
   excludeId?: string,
 ) {
-  const where = excludeId ? { id: { not: excludeId } } : {};
-  const count = await db.location.count({ where });
+  let where = excludeId ? { id: { not: excludeId } } : {};
+  let count = await db.location.count({ where });
+  if (count === 0 && excludeId) {
+    // Um único local não deve deixar a partida permanentemente sem próxima rodada.
+    where = {};
+    count = await db.location.count({ where });
+  }
   if (count === 0) {
     throw new AppError(
       'Não há locais cadastrados para iniciar a partida ranqueada.',
@@ -255,35 +274,6 @@ function buildMatchStateDTO(
   };
 }
 
-async function computeRatingDeltas(
-  tx: RankedTx,
-  match: { seasonId: string; player1Id: string; player2Id: string },
-  winnerId: string,
-) {
-  const loserId =
-    winnerId === match.player1Id ? match.player2Id : match.player1Id;
-
-  const [winnerProfile, loserProfile] = await Promise.all([
-    tx.rankedProfile.findUnique({
-      where: {
-        userId_seasonId: { userId: winnerId, seasonId: match.seasonId },
-      },
-    }),
-    tx.rankedProfile.findUnique({
-      where: { userId_seasonId: { userId: loserId, seasonId: match.seasonId } },
-    }),
-  ]);
-  if (!winnerProfile || !loserProfile) return { p1Delta: 0, p2Delta: 0 };
-
-  const winnerDelta = ratingDelta(winnerProfile.rating, loserProfile.rating, 1);
-  const loserDelta = ratingDelta(loserProfile.rating, winnerProfile.rating, 0);
-
-  return {
-    p1Delta: match.player1Id === winnerId ? winnerDelta : loserDelta,
-    p2Delta: match.player1Id === winnerId ? loserDelta : winnerDelta,
-  };
-}
-
 async function applyRatingResult(
   tx: RankedTx,
   match: { seasonId: string; player1Id: string; player2Id: string },
@@ -292,6 +282,9 @@ async function applyRatingResult(
   const loserId =
     winnerId === match.player1Id ? match.player2Id : match.player1Id;
 
+  // Protege os dois ratings mesmo se houver partidas antigas simultâneas.
+  await tx.$queryRaw`SELECT id FROM "RankedProfile" WHERE "seasonId" = ${match.seasonId} AND "userId" IN (${winnerId}, ${loserId}) ORDER BY "userId" FOR UPDATE`;
+
   const [winnerProfile, loserProfile] = await Promise.all([
     tx.rankedProfile.findUnique({
       where: {
@@ -302,7 +295,9 @@ async function applyRatingResult(
       where: { userId_seasonId: { userId: loserId, seasonId: match.seasonId } },
     }),
   ]);
-  if (!winnerProfile || !loserProfile) return;
+  if (!winnerProfile || !loserProfile) {
+    throw new AppError('Perfil ranqueado ausente para finalizar a partida.', 500);
+  }
 
   const winnerDelta = ratingDelta(winnerProfile.rating, loserProfile.rating, 1);
   const loserDelta = ratingDelta(loserProfile.rating, winnerProfile.rating, 0);
@@ -326,6 +321,10 @@ async function applyRatingResult(
       losses: { increment: 1 },
     },
   });
+  return {
+    p1Delta: match.player1Id === winnerId ? winnerDelta : loserDelta,
+    p2Delta: match.player1Id === winnerId ? loserDelta : winnerDelta,
+  };
 }
 
 export async function resolveRound(
@@ -336,6 +335,7 @@ export async function resolveRound(
   let player1Id = '';
   let player2Id = '';
   const result = await prisma.$transaction(async (tx) => {
+    await lockMatch(tx, matchId);
     const round = await tx.rankedRound.findUnique({
       where: { matchId_roundNumber: { matchId, roundNumber } },
       include: { match: true },
@@ -344,6 +344,10 @@ export async function resolveRound(
 
     const match = round.match;
     if (match.status !== 'IN_PROGRESS') return null;
+    if (
+      now < round.deadline &&
+      (!round.player1AnsweredAt || !round.player2AnsweredAt)
+    ) return null;
 
     player1Id = match.player1Id;
     player2Id = match.player2Id;
@@ -392,7 +396,7 @@ export async function resolveRound(
     }
 
     if (isOver) {
-      const { p1Delta, p2Delta } = await computeRatingDeltas(
+      const { p1Delta, p2Delta } = await applyRatingResult(
         tx,
         match,
         winnerId!,
@@ -410,7 +414,6 @@ export async function resolveRound(
           finishedAt: now,
         },
       });
-      await applyRatingResult(tx, match, winnerId!);
     } else {
       const nextRoundNumber = round.roundNumber + 1;
       const nextMultiplier = roundMultiplier(nextRoundNumber);
@@ -485,7 +488,10 @@ async function matchWithBestOpponent(
   joinerUserId: string,
   joinerRating: number,
   excludeQueueId?: string,
+  attempts = 0,
+  skippedIds: string[] = [],
 ) {
+  if (attempts >= 10) return null;
   const now = new Date();
   const candidates = await prisma.rankedQueueEntry.findMany({
     where: {
@@ -493,9 +499,15 @@ async function matchWithBestOpponent(
       status: 'WAITING',
       expiresAt: { gt: now },
       userId: { not: joinerUserId },
-      ...(excludeQueueId ? { id: { not: excludeQueueId } } : {}),
+      ...(excludeQueueId || skippedIds.length > 0
+        ? { id: {
+            ...(excludeQueueId ? { not: excludeQueueId } : {}),
+            ...(skippedIds.length > 0 ? { notIn: skippedIds } : {}),
+          } }
+        : {}),
     },
     orderBy: { createdAt: 'asc' },
+    take: 1000,
   });
 
   let best: (typeof candidates)[number] | null = null;
@@ -510,34 +522,45 @@ async function matchWithBestOpponent(
   if (!best) return null;
 
   const outcome = await prisma.$transaction(async (tx) => {
-    // Reserva atômica do candidato: apenas um request consegue alterar o status
-    // de WAITING para MATCHED. Se outro request venceu a corrida, count === 0.
-    const reservation = await tx.rankedQueueEntry.updateMany({
-      where: { id: best.id, status: 'WAITING' },
-      data: { status: 'MATCHED' },
-    });
-    if (reservation.count === 0) return null;
-
-    // Se o par já tem partida em andamento (pedido concorrente do oponente),
-    // não criamos duplicata: devolvemos a partida existente.
-    const existingMatch = await tx.rankedMatch.findFirst({
+    await lockMatchmakingUsers(tx, [best.userId, joinerUserId]);
+    await tx.$queryRaw`SELECT id FROM "Season" WHERE id = ${seasonId} FOR UPDATE`;
+    const season = await tx.season.findUnique({ where: { id: seasonId } });
+    const matchNow = new Date();
+    if (!season || season.status !== 'ACTIVE' || season.startsAt > matchNow ||
+      (season.endsAt && season.endsAt <= matchNow)) {
+      throw new AppError('A temporada ranqueada foi encerrada.', 409);
+    }
+    const joinerMatch = await tx.rankedMatch.findFirst({
       where: {
         status: 'IN_PROGRESS',
-        OR: [
-          { player1Id: best.userId, player2Id: joinerUserId },
-          { player1Id: joinerUserId, player2Id: best.userId },
-        ],
+        OR: [{ player1Id: joinerUserId }, { player2Id: joinerUserId }],
       },
       select: { id: true, player1Id: true, player2Id: true },
     });
-    if (existingMatch) {
+    if (joinerMatch) {
       return {
-        matchId: existingMatch.id,
-        player1Id: existingMatch.player1Id,
-        player2Id: existingMatch.player2Id,
+        matchId: joinerMatch.id,
+        player1Id: joinerMatch.player1Id,
+        player2Id: joinerMatch.player2Id,
         created: false,
       };
     }
+    const opponentMatch = await tx.rankedMatch.findFirst({
+      where: {
+        status: 'IN_PROGRESS',
+        OR: [{ player1Id: best.userId }, { player2Id: best.userId }],
+      },
+      select: { id: true },
+    });
+    if (opponentMatch) return null;
+
+    // Reserva atômica do candidato: apenas um request consegue alterar o status
+    // de WAITING para MATCHED. Se outro request venceu a corrida, count === 0.
+    const reservation = await tx.rankedQueueEntry.updateMany({
+      where: { id: best.id, status: 'WAITING', expiresAt: { gt: new Date() } },
+      data: { status: 'MATCHED' },
+    });
+    if (reservation.count === 0) return null;
 
     const multiplier = roundMultiplier(1);
     const location = await pickRandomLocation(tx);
@@ -553,7 +576,7 @@ async function matchWithBestOpponent(
             roundNumber: 1,
             locationId: location.id,
             multiplier,
-            deadline: new Date(now.getTime() + ROUND_TIME_LIMIT_SECONDS * 1000),
+            deadline: new Date(matchNow.getTime() + ROUND_TIME_LIMIT_SECONDS * 1000),
           },
         },
       },
@@ -591,6 +614,8 @@ async function matchWithBestOpponent(
     joinerUserId,
     joinerRating,
     excludeQueueId,
+    attempts + 1,
+    [...skippedIds, best.id],
   );
 }
 
@@ -600,10 +625,6 @@ export async function joinRankedQueue(userId: string) {
   const season = await getActiveSeason();
   const profile = await ensureProfile(userId, season.id);
   const now = new Date();
-
-  await prisma.rankedQueueEntry.deleteMany({
-    where: { status: 'WAITING', expiresAt: { lt: now } },
-  });
 
   const activeMatch = await prisma.rankedMatch.findFirst({
     where: {
@@ -670,12 +691,13 @@ export async function getRankedQueueStatus(
   const season = await getActiveSeason();
   const now = new Date();
 
-  await prisma.rankedQueueEntry.deleteMany({
-    where: { status: 'WAITING', expiresAt: { lt: now } },
-  });
-
   const matched = await prisma.rankedQueueEntry.findFirst({
-    where: { userId, seasonId: season.id, status: 'MATCHED' },
+    where: {
+      userId,
+      seasonId: season.id,
+      status: 'MATCHED',
+      match: { status: 'IN_PROGRESS' },
+    },
     orderBy: { createdAt: 'desc' },
   });
   if (matched?.matchedMatchId) {
@@ -688,7 +710,13 @@ export async function getRankedQueueStatus(
   });
   if (waiting) {
     if (waiting.expiresAt <= now) {
-      await prisma.rankedQueueEntry.delete({ where: { id: waiting.id } });
+      const removed = await prisma.rankedQueueEntry.deleteMany({
+        where: { id: waiting.id, status: 'WAITING', expiresAt: { lte: now } },
+      });
+      if (removed.count === 0) {
+        const activeMatchId = await findUserActiveMatch(userId);
+        if (activeMatchId) return { status: 'matched', matchId: activeMatchId };
+      }
       return { status: 'not_queued' };
     }
     return {
@@ -747,103 +775,118 @@ export async function submitRankedAnswer(
   roundNumber: number,
   input: SubmitAnswerInput,
 ) {
-  let match = await fetchMatch(matchId);
-  if (!match || (match.player1Id !== userId && match.player2Id !== userId)) {
+  const initialMatch = await prisma.rankedMatch.findUnique({
+    where: { id: matchId },
+    select: { player1Id: true, player2Id: true, status: true },
+  });
+  if (!initialMatch || (initialMatch.player1Id !== userId && initialMatch.player2Id !== userId)) {
     throw new AppError('Partida ranqueada não encontrada.', 404);
   }
-  if (match.status !== 'IN_PROGRESS') {
+  if (initialMatch.status !== 'IN_PROGRESS') {
     throw new AppError('Esta partida ranqueada já foi encerrada.', 409);
   }
 
-  const round = match.rounds.find((r) => r.roundNumber === roundNumber);
-  if (!round) throw new AppError('Rodada não encontrada.', 404);
-  if (round.roundNumber !== match.currentRoundNumber) {
-    throw new AppError('Esta não é a rodada atual da partida.', 409);
-  }
-  if (round.resolvedAt) {
-    throw new AppError('Esta rodada já foi encerrada.', 410);
-  }
+  const outcome = await prisma.$transaction(async (tx) => {
+    await lockMatch(tx, matchId);
+    const round = await tx.rankedRound.findUnique({
+      where: { matchId_roundNumber: { matchId, roundNumber } },
+      include: { match: true, location: true },
+    });
+    if (!round) throw new AppError('Rodada não encontrada.', 404);
+    if (round.match.player1Id !== userId && round.match.player2Id !== userId) {
+      throw new AppError('Partida ranqueada não encontrada.', 404);
+    }
+    if (round.match.status !== 'IN_PROGRESS') {
+      throw new AppError('Esta partida ranqueada já foi encerrada.', 409);
+    }
+    if (round.roundNumber !== round.match.currentRoundNumber) {
+      throw new AppError('Esta não é a rodada atual da partida.', 409);
+    }
+    if (round.resolvedAt) {
+      throw new AppError('Esta rodada já foi encerrada.', 410);
+    }
 
-  const isPlayer1 = match.player1Id === userId;
-  const now = new Date();
+    const now = new Date();
+    if (now >= round.deadline) return { expired: true as const };
+    const isPlayer1 = round.match.player1Id === userId;
+    if (isPlayer1 ? round.player1AnsweredAt : round.player2AnsweredAt) {
+      throw new AppError('Você já respondeu esta rodada.', 409);
+    }
 
-  if (now >= round.deadline) {
-    await resolveRound(matchId, roundNumber, now);
+    const distanceMeters = haversineDistanceMeters(
+      input.guessLatitude,
+      input.guessLongitude,
+      Number(round.location.latitude),
+      Number(round.location.longitude),
+    );
+    const score = calculateScore(distanceMeters);
+    const isFirstAnswer = !round.player1AnsweredAt && !round.player2AnsweredAt;
+    let deadline = round.deadline;
+    if (isFirstAnswer) {
+      const originalDeadline = new Date(
+        round.startedAt.getTime() + ROUND_TIME_LIMIT_SECONDS * 1000,
+      );
+      const earlyCutoff = new Date(
+        originalDeadline.getTime() - EARLY_ANSWER_WINDOW_SECONDS * 1000,
+      );
+      if (now <= earlyCutoff) {
+        const shortened = new Date(
+          now.getTime() + EARLY_ANSWER_WINDOW_SECONDS * 1000,
+        );
+        deadline = shortened < round.deadline ? shortened : round.deadline;
+      }
+    }
+
+    const answerData = isPlayer1
+      ? {
+          player1GuessLatitude: input.guessLatitude,
+          player1GuessLongitude: input.guessLongitude,
+          player1Score: score,
+          player1DistanceMeters: distanceMeters,
+          player1AnsweredAt: now,
+        }
+      : {
+          player2GuessLatitude: input.guessLatitude,
+          player2GuessLongitude: input.guessLongitude,
+          player2Score: score,
+          player2DistanceMeters: distanceMeters,
+          player2AnsweredAt: now,
+        };
+
+    await tx.rankedRound.update({
+      where: { id: round.id },
+      data: {
+        ...answerData,
+        ...(deadline.getTime() !== round.deadline.getTime() && { deadline }),
+      },
+    });
+    return {
+      expired: false as const,
+      opponentAnswered: isPlayer1
+        ? !!round.player2AnsweredAt
+        : !!round.player1AnsweredAt,
+      player1Id: round.match.player1Id,
+      player2Id: round.match.player2Id,
+    };
+  });
+
+  if (outcome.expired) {
+    await resolveRound(matchId, roundNumber, new Date());
     throw new AppError('O tempo da rodada esgotou.', 410);
   }
-  if (isPlayer1 ? round.player1AnsweredAt : round.player2AnsweredAt) {
-    throw new AppError('Você já respondeu esta rodada.', 409);
-  }
-
-  const location = await prisma.location.findUnique({
-    where: { id: round.locationId },
-  });
-  if (!location) throw new AppError('Local não encontrado.', 404);
-
-  const distanceMeters = haversineDistanceMeters(
-    input.guessLatitude,
-    input.guessLongitude,
-    Number(location.latitude),
-    Number(location.longitude),
-  );
-  const score = calculateScore(distanceMeters);
-
-  const isFirstAnswer = !round.player1AnsweredAt && !round.player2AnsweredAt;
-  let deadline = round.deadline;
-  if (isFirstAnswer) {
-    const originalDeadline = new Date(
-      round.startedAt.getTime() + ROUND_TIME_LIMIT_SECONDS * 1000,
-    );
-    const earlyCutoff = new Date(
-      originalDeadline.getTime() - EARLY_ANSWER_WINDOW_SECONDS * 1000,
-    );
-    if (now <= earlyCutoff) {
-      const shortened = new Date(
-        now.getTime() + EARLY_ANSWER_WINDOW_SECONDS * 1000,
-      );
-      deadline = shortened < round.deadline ? shortened : round.deadline;
-    }
-  }
-
-  const answerData = isPlayer1
-    ? {
-        player1GuessLatitude: input.guessLatitude,
-        player1GuessLongitude: input.guessLongitude,
-        player1Score: score,
-        player1DistanceMeters: distanceMeters,
-        player1AnsweredAt: now,
-      }
-    : {
-        player2GuessLatitude: input.guessLatitude,
-        player2GuessLongitude: input.guessLongitude,
-        player2Score: score,
-        player2DistanceMeters: distanceMeters,
-        player2AnsweredAt: now,
-      };
-
-  await prisma.rankedRound.update({
-    where: { id: round.id },
-    data: {
-      ...answerData,
-      ...(deadline.getTime() !== round.deadline.getTime() && { deadline }),
-    },
-  });
 
   rankedEvents.emitRoundAnswered({
     matchId,
     roundNumber,
-    player1Id: match.player1Id,
-    player2Id: match.player2Id,
+    player1Id: outcome.player1Id,
+    player2Id: outcome.player2Id,
   });
 
-  const opponentAnswered = isPlayer1
-    ? !!round.player2AnsweredAt
-    : !!round.player1AnsweredAt;
-  if (opponentAnswered) {
-    await resolveRound(matchId, roundNumber, now);
+  if (outcome.opponentAnswered) {
+    await resolveRound(matchId, roundNumber, new Date());
   }
 
-  match = await fetchMatch(matchId);
+  const match = await fetchMatch(matchId);
   if (!match) throw new AppError('Partida ranqueada não encontrada.', 404);
 
   return buildMatchStateDTO(match, userId);
@@ -1109,45 +1152,47 @@ export async function listSeasons() {
   return prisma.season.findMany({ orderBy: { startsAt: 'desc' }, take: 100 });
 }
 
-async function endSeason(seasonId: string, endedAt: Date) {
-  await prisma.season.update({
+async function endSeason(tx: RankedTx, seasonId: string, endedAt: Date) {
+  await tx.season.update({
     where: { id: seasonId },
     data: { status: 'ENDED', endsAt: endedAt },
   });
-  await prisma.rankedMatch.updateMany({
+  await tx.rankedMatch.updateMany({
     where: { seasonId, status: 'IN_PROGRESS' },
     data: { status: 'ABANDONED', finishedAt: endedAt },
   });
 }
 
 export async function createSeason(input: CreateSeasonInput) {
-  const now = new Date();
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(781293481)`;
+    const now = new Date();
+    const active = await tx.season.findFirst({
+      where: { status: 'ACTIVE' },
+      orderBy: { startsAt: 'desc' },
+    });
+    if (active) await endSeason(tx, active.id, now);
 
-  const active = await prisma.season.findFirst({
-    where: { status: 'ACTIVE' },
-    orderBy: { startsAt: 'desc' },
-  });
-  if (active) {
-    await endSeason(active.id, now);
-  }
-
-  const total = await prisma.season.count();
-  const name = input.name?.trim() || `Temporada ${total + 1}`;
-
-  return prisma.season.create({
-    data: { name, status: 'ACTIVE', startsAt: now },
+    const total = await tx.season.count();
+    const name = input.name?.trim() || `Temporada ${total + 1}`;
+    return tx.season.create({
+      data: { name, status: 'ACTIVE', startsAt: now },
+    });
   });
 }
 
 export async function endCurrentSeason() {
-  const now = new Date();
-  const active = await prisma.season.findFirst({
-    where: { status: 'ACTIVE' },
-    orderBy: { startsAt: 'desc' },
-  });
-  if (!active)
-    throw new AppError('Não há uma temporada ativa para encerrar.', 409);
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(781293481)`;
+    const now = new Date();
+    const active = await tx.season.findFirst({
+      where: { status: 'ACTIVE' },
+      orderBy: { startsAt: 'desc' },
+    });
+    if (!active)
+      throw new AppError('Não há uma temporada ativa para encerrar.', 409);
 
-  await endSeason(active.id, now);
-  return { id: active.id, name: active.name, status: 'ENDED', endsAt: now };
+    await endSeason(tx, active.id, now);
+    return { id: active.id, name: active.name, status: 'ENDED', endsAt: now };
+  });
 }

@@ -113,6 +113,7 @@ const ROUND_START = new Date(NOW.getTime() - 10_000);
 const ROUND_DEADLINE = new Date(NOW.getTime() + 50_000);
 
 const mockTx = {
+  $queryRaw: jest.fn(),
   rankedRound: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
   rankedMatch: {
     create: jest.fn(),
@@ -123,6 +124,7 @@ const mockTx = {
   rankedProfile: { findUnique: jest.fn(), update: jest.fn() },
   rankedQueueEntry: { updateMany: jest.fn(), update: jest.fn() },
   location: { count: jest.fn(), findFirst: jest.fn() },
+  season: prisma.season,
 };
 
 const seasonRecord = (overrides: Record<string, unknown> = {}) => ({
@@ -223,6 +225,21 @@ beforeEach(() => {
   jest.useFakeTimers();
   jest.setSystemTime(NOW);
   mockTx.rankedRound.findUnique.mockReset();
+  mockTx.$queryRaw.mockReset();
+  mockTx.$queryRaw.mockResolvedValue([{ id: 'match-1' }]);
+  mockSeasonFindUnique.mockResolvedValue(seasonRecord());
+  mockTx.rankedRound.findUnique.mockImplementation(async (args: {
+    where: { matchId_roundNumber: { roundNumber: number } };
+  }) => {
+    const firstMatch = await mockMatchFindUnique.mock.results[0]?.value;
+    const round = firstMatch?.rounds?.find(
+      (item: { roundNumber: number }) =>
+        item.roundNumber === args.where.matchId_roundNumber.roundNumber,
+    );
+    if (!round) return null;
+    const location = await mockLocationFindUnique({ where: { id: round.locationId } });
+    return { ...round, match: firstMatch, location };
+  });
   mockTx.rankedRound.create.mockReset();
   mockTx.rankedRound.update.mockReset();
   mockTx.rankedMatch.create.mockReset();
@@ -307,7 +324,7 @@ describe('joinRankedQueue', () => {
       }),
     );
     expect(mockTx.rankedQueueEntry.updateMany).toHaveBeenCalledWith({
-      where: { id: 'q2', status: 'WAITING' },
+      where: { id: 'q2', status: 'WAITING', expiresAt: { gt: expect.any(Date) } },
       data: { status: 'MATCHED' },
     });
     expect(mockTx.rankedMatch.create).toHaveBeenCalledWith(
@@ -357,11 +374,38 @@ describe('joinRankedQueue', () => {
     const result = await joinRankedQueue('user-1');
 
     expect(mockTx.rankedQueueEntry.updateMany).toHaveBeenCalledWith({
-      where: { id: 'q2', status: 'WAITING' },
+      where: { id: 'q2', status: 'WAITING', expiresAt: { gt: expect.any(Date) } },
       data: { status: 'MATCHED' },
     });
     expect(mockTx.rankedMatch.create).not.toHaveBeenCalled();
     expect(result).toEqual({ status: 'queued', queueId: 'queue-1' });
+  });
+
+  it('ignora uma entrada antiga cujo usuário já está em outra partida', async () => {
+    mockSeasonFindFirst.mockResolvedValue(seasonRecord());
+    mockProfileFindUnique.mockResolvedValue(profileRecord());
+    mockMatchFindFirst.mockResolvedValue(null);
+    mockQueueDeleteMany.mockResolvedValue({ count: 0 });
+    mockQueueFindMany
+      .mockResolvedValueOnce([queueEntryRecord({ id: 'q-antiga', userId: 'user-2' })])
+      .mockResolvedValueOnce([queueEntryRecord({ id: 'q-valida', userId: 'user-3' })]);
+    mockTx.rankedMatch.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 'outra-partida' })
+      .mockResolvedValue(null);
+    mockTx.rankedQueueEntry.updateMany.mockResolvedValue({ count: 1 });
+    mockTx.location.count.mockResolvedValue(1);
+    mockTx.location.findFirst.mockResolvedValue({ id: 'loc-1' });
+    mockTx.rankedMatch.create.mockResolvedValue({
+      id: 'match-1', player1Id: 'user-3', player2Id: 'user-1',
+    });
+
+    const result = await joinRankedQueue('user-1');
+
+    expect(result).toEqual({ status: 'matched', matchId: 'match-1' });
+    expect(mockQueueFindMany).toHaveBeenNthCalledWith(2,
+      expect.objectContaining({ where: expect.objectContaining({ id: { notIn: ['q-antiga'] } }) }),
+    );
   });
 
   it('entra na fila quando não há oponente', async () => {
@@ -462,6 +506,21 @@ describe('getRankedQueueStatus', () => {
 
     expect(result).toEqual({ status: 'not_queued' });
   });
+
+  it('remove apenas a entrada ainda pendente quando ela expira', async () => {
+    mockSeasonFindFirst.mockResolvedValue(seasonRecord());
+    mockQueueFindFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(queueEntryRecord({ expiresAt: NOW }));
+    mockQueueDeleteMany.mockResolvedValue({ count: 1 });
+
+    const result = await getRankedQueueStatus('user-2');
+
+    expect(result).toEqual({ status: 'not_queued' });
+    expect(mockQueueDeleteMany).toHaveBeenCalledWith({
+      where: { id: 'queue-1', status: 'WAITING', expiresAt: { lte: NOW } },
+    });
+  });
 });
 
 describe('leaveRankedQueue', () => {
@@ -525,6 +584,21 @@ describe('getRankedMatch', () => {
 describe('submitRankedAnswer', () => {
   const input = { guessLatitude: 0.001, guessLongitude: 0 };
 
+  it('não sobrescreve resposta gravada após a leitura inicial', async () => {
+    mockMatchFindUnique.mockResolvedValue(matchRecord());
+    mockTx.rankedRound.findUnique.mockResolvedValue({
+      ...roundRecord({ player1AnsweredAt: NOW, player1Score: 800 }),
+      match: matchRecord(),
+      location: { latitude: 0, longitude: 0 },
+    });
+
+    await expect(
+      submitRankedAnswer('match-1', 'user-1', 1, input),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    expect(mockTx.rankedRound.update).not.toHaveBeenCalled();
+    expect(mockTx.$queryRaw).toHaveBeenCalled();
+  });
+
   it('lança 404 quando a partida não existe', async () => {
     mockMatchFindUnique.mockResolvedValue(null);
 
@@ -553,7 +627,6 @@ describe('submitRankedAnswer', () => {
         rounds: [roundRecord({ deadline: new Date(NOW.getTime() - 1000) })],
       }),
     );
-    mockTx.rankedRound.findUnique.mockResolvedValue(null);
 
     await expect(
       submitRankedAnswer('match-1', 'user-1', 1, input),
@@ -602,21 +675,21 @@ describe('submitRankedAnswer', () => {
       latitude: 0,
       longitude: 0,
     });
-    mockRoundUpdate.mockResolvedValue(roundRecord({ player1AnsweredAt: NOW }));
+    mockTx.rankedRound.update.mockResolvedValue(roundRecord({ player1AnsweredAt: NOW }));
 
     const result = await submitRankedAnswer('match-1', 'user-1', 1, input);
 
     const expectedDeadline = new Date(
       NOW.getTime() + EARLY_ANSWER_WINDOW_SECONDS * 1000,
     );
-    expect(mockRoundUpdate).toHaveBeenCalledWith({
+    expect(mockTx.rankedRound.update).toHaveBeenCalledWith({
       where: { id: 'round-1' },
       data: expect.objectContaining({
         player1Score: expect.any(Number),
         deadline: expectedDeadline,
       }),
     });
-    expect(mockTransaction).not.toHaveBeenCalled();
+    expect(mockTransaction).toHaveBeenCalledTimes(1);
     expect(result.currentRound.myAnswered).toBe(true);
   });
 
@@ -649,11 +722,11 @@ describe('submitRankedAnswer', () => {
       latitude: 0,
       longitude: 0,
     });
-    mockRoundUpdate.mockResolvedValue(roundRecord({ player1AnsweredAt: NOW }));
+    mockTx.rankedRound.update.mockResolvedValue(roundRecord({ player1AnsweredAt: NOW }));
 
     await submitRankedAnswer('match-1', 'user-1', 1, input);
 
-    const updateCall = mockRoundUpdate.mock.calls[0]?.[0] as {
+    const updateCall = mockTx.rankedRound.update.mock.calls[0]?.[0] as {
       data: Record<string, unknown>;
     };
     expect(updateCall.data).not.toHaveProperty('deadline');
@@ -697,9 +770,13 @@ describe('submitRankedAnswer', () => {
       latitude: 0,
       longitude: 0,
     });
-    mockRoundUpdate.mockResolvedValue(roundRecord());
+    mockTx.rankedRound.update.mockResolvedValue(roundRecord());
 
-    mockTx.rankedRound.findUnique.mockResolvedValue({
+    mockTx.rankedRound.findUnique.mockResolvedValueOnce({
+      ...roundRecord({ player2AnsweredAt: NOW, player2Score: 100 }),
+      match: matchRecord(),
+      location: { latitude: 0, longitude: 0 },
+    }).mockResolvedValue({
       ...roundRecord(),
       player1AnsweredAt: NOW,
       player1Score: 1000,
@@ -730,7 +807,7 @@ describe('submitRankedAnswer', () => {
       guessLongitude: 0,
     });
 
-    expect(mockTransaction).toHaveBeenCalledTimes(1);
+    expect(mockTransaction).toHaveBeenCalledTimes(2);
     const nextRoundUpdate = mockTx.rankedMatch.update.mock.calls[0]?.[0] as {
       data: {
         player2Health: number;
@@ -802,9 +879,16 @@ describe('submitRankedAnswer', () => {
       latitude: 0,
       longitude: 0,
     });
-    mockRoundUpdate.mockResolvedValue({});
+    mockTx.rankedRound.update.mockResolvedValue({});
 
-    mockTx.rankedRound.findUnique.mockResolvedValue({
+    mockTx.rankedRound.findUnique.mockResolvedValueOnce({
+      ...roundRecord({
+        id: 'round-2', roundNumber: 2, multiplier: 1.5,
+        player2AnsweredAt: NOW, player2Score: 100,
+      }),
+      match: matchRecord({ currentRoundNumber: 2, player2Health: 500 }),
+      location: { latitude: 0, longitude: 0 },
+    }).mockResolvedValue({
       ...roundRecord({
         id: 'round-2',
         roundNumber: 2,
@@ -898,6 +982,40 @@ describe('submitRankedAnswer', () => {
     });
     expect(mockTx.rankedProfile.update).not.toHaveBeenCalled();
     expect(result).toEqual({ finished: true, winnerId: null, roundNumber: 1 });
+  });
+
+  it('não resolve uma rodada antes do prazo com apenas um palpite', async () => {
+    mockTx.rankedRound.findUnique.mockResolvedValue({
+      ...roundRecord({ player1AnsweredAt: NOW, player1Score: 500 }),
+      match: matchRecord(),
+    });
+
+    const result = await resolveRound('match-1', 1, NOW);
+
+    expect(result).toBeNull();
+    expect(mockTx.rankedRound.update).not.toHaveBeenCalled();
+    expect(mockTx.rankedMatch.update).not.toHaveBeenCalled();
+  });
+
+  it('repete o único local disponível sem travar a partida', async () => {
+    mockTx.rankedRound.findUnique.mockResolvedValue({
+      ...roundRecord({
+        player1AnsweredAt: NOW,
+        player2AnsweredAt: NOW,
+        player1Score: 500,
+        player2Score: 400,
+      }),
+      match: matchRecord(),
+    });
+    mockTx.location.count.mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+    mockTx.location.findFirst.mockResolvedValue({ id: 'loc-1' });
+
+    await resolveRound('match-1', 1, NOW);
+
+    expect(mockTx.location.count).toHaveBeenCalledTimes(2);
+    expect(mockTx.rankedRound.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ locationId: 'loc-1', roundNumber: 2 }),
+    });
   });
 });
 
@@ -1158,7 +1276,7 @@ describe('createSeason / endCurrentSeason', () => {
       where: { id: 'season-1' },
       data: expect.objectContaining({ status: 'ENDED' }),
     });
-    expect(mockMatchUpdateMany).toHaveBeenCalledWith({
+    expect(mockTx.rankedMatch.updateMany).toHaveBeenCalledWith({
       where: { seasonId: 'season-1', status: 'IN_PROGRESS' },
       data: { status: 'ABANDONED', finishedAt: expect.any(Date) },
     });

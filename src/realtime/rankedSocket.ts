@@ -20,6 +20,8 @@ import type {
 
 const PRESENCE_BROADCAST_DEBOUNCE_MS = 300;
 const PRESENCE_SWEEP_INTERVAL_MS = 30_000;
+const SOCKET_EVENT_WINDOW_MS = 10_000;
+const SOCKET_EVENT_LIMIT = 60;
 
 const matchStateSchema = z.object({
   matchId: z.string().trim().min(1),
@@ -44,6 +46,7 @@ export class RankedSocketGateway {
 
   private userSockets = new Map<string, Set<Socket>>();
   private lastSeen = new Map<string, number>();
+  private eventWindows = new Map<string, { count: number; resetsAt: number }>();
 
   private roundTimers = new Map<string, NodeJS.Timeout>();
   private presenceTimer: NodeJS.Timeout | null = null;
@@ -77,15 +80,13 @@ export class RankedSocketGateway {
     const rankedNamespace = ioServer.of('/ranked');
 
     rankedNamespace.use((socket, next) => {
-      const token =
-        (socket.handshake.auth?.token as string | undefined) ??
-        (typeof socket.handshake.query.token === 'string'
-          ? socket.handshake.query.token
-          : undefined);
-      if (!token) return next(new Error('Não autenticado.'));
+      // Tokens em query string acabam em logs de proxy, histórico e métricas.
+      const token = socket.handshake.auth?.token;
+      if (typeof token !== 'string' || !token) return next(new Error('Não autenticado.'));
       try {
         const payload = verifyAccessToken(token);
         socket.data.user = { id: payload.sub, role: payload.role };
+        socket.data.accessExpiresAt = (payload as typeof payload & { exp?: number }).exp;
         next();
       } catch {
         next(new Error('Token de acesso inválido ou expirado.'));
@@ -122,6 +123,27 @@ export class RankedSocketGateway {
     this.registerUserSocket(user.id, socket);
     this.lastSeen.set(user.id, Date.now());
 
+    socket.use((_packet, next) => {
+      const now = Date.now();
+      let window = this.eventWindows.get(user.id);
+      if (!window || now >= window.resetsAt) {
+        window = { count: 0, resetsAt: now + SOCKET_EVENT_WINDOW_MS };
+        this.eventWindows.set(user.id, window);
+      }
+      if (++window.count > SOCKET_EVENT_LIMIT) {
+        socket.emit('error', { code: 429, message: 'Muitas mensagens. Tente novamente em instantes.' });
+        socket.disconnect(true);
+        return next(new Error('Limite de mensagens excedido.'));
+      }
+      next();
+    });
+
+    const expiresAt = socket.data.accessExpiresAt as number | undefined;
+    const authTimer = expiresAt
+      ? setTimeout(() => socket.disconnect(true), Math.max(0, expiresAt * 1000 - Date.now()))
+      : null;
+    authTimer?.unref?.();
+
     socket.on('dev:ping', () => {
       this.lastSeen.set(user.id, Date.now());
       socket.emit('dev:pong', { ts: Date.now() });
@@ -136,7 +158,10 @@ export class RankedSocketGateway {
     socket.on('match:answer', (payload: unknown) =>
       void this.onMatchAnswer(socket, user.id, payload),
     );
-    socket.on('disconnect', () => this.unregisterUserSocket(user.id, socket));
+    socket.on('disconnect', () => {
+      if (authTimer) clearTimeout(authTimer);
+      this.unregisterUserSocket(user.id, socket);
+    });
 
     socket.emit('welcome', {
       user: { id: user.id, role: user.role },
@@ -177,6 +202,7 @@ export class RankedSocketGateway {
     }
     this.userSockets.clear();
     this.lastSeen.clear();
+    this.eventWindows.clear();
 
     if (this.io) {
       this.io.disconnectSockets(true);
@@ -209,6 +235,9 @@ export class RankedSocketGateway {
 
   private sweepPresence() {
     const now = Date.now();
+    for (const [userId, window] of this.eventWindows) {
+      if (now >= window.resetsAt) this.eventWindows.delete(userId);
+    }
     for (const [userId, lastSeen] of this.lastSeen) {
       if (now - lastSeen > PRESENCE_SWEEP_INTERVAL_MS * 2 && !this.userSockets.has(userId)) {
         this.lastSeen.delete(userId);

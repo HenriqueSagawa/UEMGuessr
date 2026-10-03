@@ -47,6 +47,7 @@ function createFakeSocket(
     data: { user },
     connected: true,
     disconnect: jest.fn(),
+    use: jest.fn(),
     emit: jest.fn((event: string, payload?: any) => {
       emitted.push({ event, payload });
     }),
@@ -154,6 +155,31 @@ describe('RankedSocketGateway', () => {
       const socket = { data: {}, disconnect: jest.fn() } as unknown as Socket;
       rankedSocketHub.handleConnection(socket);
       expect(socket.disconnect).toHaveBeenCalledWith(true);
+    });
+
+    it('desconecta a sessão quando o token de acesso expira', () => {
+      mockQueueStatus.mockResolvedValue({ status: 'not_queued' });
+      alice = createFakeSocket({ id: 'user-1', role: 'USER' });
+      alice.socket.data.accessExpiresAt = Math.floor(Date.now() / 1000) + 1;
+      rankedSocketHub.handleConnection(alice.socket);
+
+      jest.advanceTimersByTime(1100);
+
+      expect(alice.socket.disconnect).toHaveBeenCalledWith(true);
+    });
+
+    it('limita mensagens de socket por usuário', () => {
+      mockQueueStatus.mockResolvedValue({ status: 'not_queued' });
+      alice = createFakeSocket({ id: 'user-1', role: 'USER' });
+      rankedSocketHub.handleConnection(alice.socket);
+      const middleware = (alice.socket.use as jest.Mock).mock.calls[0]?.[0] as
+        (packet: unknown[], next: jest.Mock) => void;
+      const next = jest.fn();
+
+      for (let index = 0; index < 61; index++) middleware(['queue:status'], next);
+
+      expect(alice.lastOf('error')).toMatchObject({ code: 429 });
+      expect(alice.socket.disconnect).toHaveBeenCalledWith(true);
     });
   });
 
