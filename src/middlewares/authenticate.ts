@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { verifyAccessToken } from "../lib/jwt";
 import { AppError } from "../utils/appError";
+import { prisma } from "../config/prisma";
 
 export function authenticate(req: Request, _res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
@@ -21,10 +22,21 @@ export function authenticate(req: Request, _res: Response, next: NextFunction) {
 }
 
 export function requireRole(...roles: string[]) {
-  return (req: Request, _res: Response, next: NextFunction) => {
+  return async (req: Request, _res: Response, next: NextFunction) => {
     if (!req.user || !roles.includes(req.user.role)) {
       return next(new AppError("Você não tem permissão para acessar este recurso.", 403));
     }
-    next();
+    try {
+      const user = await prisma.user.findUnique({
+        where: { id: req.user.id },
+        select: { role: true },
+      });
+      if (!user || !roles.includes(user.role)) {
+        return next(new AppError("Você não tem permissão para acessar este recurso.", 403));
+      }
+      next();
+    } catch (error) {
+      next(error);
+    }
   };
 }
