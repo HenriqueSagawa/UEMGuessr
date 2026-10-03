@@ -454,6 +454,8 @@ Cada partida (`Game`) tem **5 rodadas** (`TOTAL_ROUNDS_PER_GAME`), e o score fin
 | `POST` | `/games/:id/rounds` | Envia um palpite (lat/lng) e recebe o score | 🔒 JWT |
 | `POST` | `/games/:id/finish` | Encerra a partida manualmente | 🔒 JWT |
 
+O local de cada rodada fica vinculado à partida ao consultar `/next-round`. Consultas repetidas retornam o mesmo local até o palpite ser registrado; `/rounds` rejeita um `locationId` diferente.
+
 </details>
 
 <details>
@@ -511,7 +513,7 @@ import { io } from 'socket.io-client';
 const socket = io('https://api.exemplo.com', {
   path: '/socket.io',
   transports: ['websocket'],
-  auth: { token: accessToken }, // ou ?token= na URL
+  auth: { token: accessToken },
 });
 
 socket.on('connect', () => {
@@ -566,7 +568,7 @@ Na conexão, o servidor **sincroniza automaticamente** o estado do usuário: se 
 
 ### Pré-requisitos
 
-- **Node.js** ≥ 18
+- **Node.js** ≥ 20.19 (ou ≥ 22.12)
 - **PostgreSQL** (local ou hospedado)
 - Conta no **Cloudinary** (para upload de imagens)
 - Credenciais **OAuth 2.0 do Google** (para login social)
@@ -632,6 +634,8 @@ CLOUDINARY_API_SECRET=
 npm run prisma:migrate
 ```
 
+Em produção, aplique as migrações versionadas com `npm run prisma:deploy` antes de iniciar a nova versão da API. A migração mais recente adiciona o local pendente de cada partida comum e índices para consultas ranqueadas.
+
 ### 5. Suba o servidor em modo desenvolvimento
 
 ```bash
@@ -649,6 +653,7 @@ O servidor sobe por padrão em `http://localhost:3000`, com hot-reload via `tsx 
 | `npm start` | Roda a build de produção (`dist/server.js`) |
 | `npm run prisma:generate` | Gera o Prisma Client |
 | `npm run prisma:migrate` | Aplica migrações no banco de dados |
+| `npm run prisma:deploy` | Aplica migrações versionadas em produção |
 | `npm run prisma:studio` | Abre o Prisma Studio (GUI do banco) |
 | `npm test` | Executa a suíte de testes com Jest |
 | `npm run test:watch` | Executa os testes em modo watch |
