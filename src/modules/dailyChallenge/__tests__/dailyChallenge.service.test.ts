@@ -159,6 +159,18 @@ describe('ensureActiveChallenge', () => {
     });
   });
 
+  it('permite repetir um local quando todos foram usados recentemente', async () => {
+    mockChallengeFindUnique.mockResolvedValue(null);
+    mockChallengeFindMany.mockResolvedValue([{ locationId: 'loc-1' }]);
+    mockLocationCount.mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+    mockLocationFindFirst.mockResolvedValue(locationRecord());
+    mockChallengeCreate.mockResolvedValue(challengeRecord());
+
+    await ensureActiveChallenge();
+
+    expect(mockLocationFindFirst).toHaveBeenCalledWith({ where: {}, skip: 0 });
+  });
+
   it('lança 503 quando não há locais disponíveis', async () => {
     mockChallengeFindUnique.mockResolvedValue(null);
     mockChallengeFindMany.mockResolvedValue([]);
@@ -350,6 +362,16 @@ describe('submitDailyChallengeGuess', () => {
     });
   });
 
+  it('rejeita o segundo envio quando a tentativa foi concluída em paralelo', async () => {
+    mockChallengeFindUnique.mockResolvedValue(challengeRecord());
+    mockAttemptFindUnique.mockResolvedValue(attemptRecord({ startedAt: NOW }));
+    mockAttemptUpdate.mockRejectedValue({ code: 'P2025' });
+
+    await expect(
+      submitDailyChallengeGuess('challenge-1', 'user-1', input),
+    ).rejects.toMatchObject({ statusCode: 409 });
+  });
+
   it('lança 410 se o tempo para responder esgotou', async () => {
     mockChallengeFindUnique.mockResolvedValue(challengeRecord());
     mockAttemptFindUnique.mockResolvedValue(
@@ -382,7 +404,7 @@ describe('submitDailyChallengeGuess', () => {
     );
 
     expect(mockAttemptUpdate).toHaveBeenCalledWith({
-      where: { id: 'attempt-1' },
+      where: { id: 'attempt-1', submittedAt: null },
       data: expect.objectContaining({
         guessLatitude: 0.001,
         guessLongitude: 0,

@@ -53,12 +53,16 @@ export async function ensureActiveChallenge() {
   const excludedLocationIds = recentChallenges.map(
     (challenge) => challenge.locationId,
   );
-  const where =
+  let where =
     excludedLocationIds.length > 0
       ? { id: { notIn: excludedLocationIds } }
       : {};
 
-  const availableCount = await prisma.location.count({ where });
+  let availableCount = await prisma.location.count({ where });
+  if (availableCount === 0 && excludedLocationIds.length > 0) {
+    where = {};
+    availableCount = await prisma.location.count({ where });
+  }
   if (availableCount === 0) {
     throw new AppError(
       'Não há locais cadastrados para gerar o desafio diário.',
@@ -194,11 +198,23 @@ export async function startDailyChallenge(challengeId: string, userId: string) {
     throw new AppError('Você já participou do desafio diário de hoje.', 409);
   }
 
-  const attempt =
-    existing ??
-    (await prisma.dailyChallengeAttempt.create({
-      data: { challengeId, userId },
-    }));
+  let attempt = existing;
+  if (!attempt) {
+    try {
+      attempt = await prisma.dailyChallengeAttempt.create({
+        data: { challengeId, userId },
+      });
+    } catch (error: unknown) {
+      if (!isPrismaUniqueViolation(error)) throw error;
+      attempt = await prisma.dailyChallengeAttempt.findUnique({
+        where: { challengeId_userId: { challengeId, userId } },
+      });
+      if (!attempt) throw error;
+    }
+  }
+  if (attempt.submittedAt) {
+    throw new AppError('Você já participou do desafio diário de hoje.', 409);
+  }
 
   return {
     attemptId: attempt.id,
@@ -257,16 +273,24 @@ export async function submitDailyChallengeGuess(
   );
   const score = calculateScore(distanceMeters);
 
-  const updated = await prisma.dailyChallengeAttempt.update({
-    where: { id: attempt.id },
-    data: {
-      guessLatitude: input.guessLatitude,
-      guessLongitude: input.guessLongitude,
-      distanceMeters,
-      score,
-      submittedAt: now,
-    },
-  });
+  let updated;
+  try {
+    updated = await prisma.dailyChallengeAttempt.update({
+      where: { id: attempt.id, submittedAt: null },
+      data: {
+        guessLatitude: input.guessLatitude,
+        guessLongitude: input.guessLongitude,
+        distanceMeters,
+        score,
+        submittedAt: now,
+      },
+    });
+  } catch (error: unknown) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2025') {
+      throw new AppError('Você já enviou seu palpite no desafio diário de hoje.', 409);
+    }
+    throw error;
+  }
 
   return {
     score: updated.score,
