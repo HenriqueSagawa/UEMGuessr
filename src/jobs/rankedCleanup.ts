@@ -8,11 +8,14 @@ export async function runRankedCleanup() {
   const now = new Date();
 
   const pendingMatches = await prisma.rankedMatch.findMany({
-    where: { status: 'IN_PROGRESS' },
+    where: {
+      status: 'IN_PROGRESS',
+      rounds: { some: { resolvedAt: null, deadline: { lt: now } } },
+    },
     select: {
       id: true,
       rounds: {
-        where: { resolvedAt: null },
+        where: { resolvedAt: null, deadline: { lt: now } },
         orderBy: { roundNumber: 'desc' },
         take: 1,
       },

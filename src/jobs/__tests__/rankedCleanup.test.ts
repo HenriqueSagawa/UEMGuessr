@@ -57,11 +57,14 @@ describe('runRankedCleanup', () => {
     await runRankedCleanup();
 
     expect(mockMatchFindMany).toHaveBeenCalledWith({
-      where: { status: 'IN_PROGRESS' },
+      where: {
+        status: 'IN_PROGRESS',
+        rounds: { some: { resolvedAt: null, deadline: { lt: NOW } } },
+      },
       select: {
         id: true,
         rounds: {
-          where: { resolvedAt: null },
+          where: { resolvedAt: null, deadline: { lt: NOW } },
           orderBy: { roundNumber: 'desc' },
           take: 1,
         },
