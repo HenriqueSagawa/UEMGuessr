@@ -38,7 +38,8 @@ async function lockMatch(tx: RankedTx, matchId: string) {
 
 async function lockMatchmakingUsers(tx: RankedTx, userIds: string[]) {
   for (const userId of [...userIds].sort()) {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${userId}, 0))`;
+    // A função retorna void no PostgreSQL, que o Prisma não consegue desserializar.
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${userId}, 0))::text`;
   }
 }
 
@@ -1165,7 +1166,7 @@ async function endSeason(tx: RankedTx, seasonId: string, endedAt: Date) {
 
 export async function createSeason(input: CreateSeasonInput) {
   return prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(781293481)`;
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(781293481)::text`;
     const now = new Date();
     const active = await tx.season.findFirst({
       where: { status: 'ACTIVE' },
@@ -1183,7 +1184,7 @@ export async function createSeason(input: CreateSeasonInput) {
 
 export async function endCurrentSeason() {
   return prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(781293481)`;
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(781293481)::text`;
     const now = new Date();
     const active = await tx.season.findFirst({
       where: { status: 'ACTIVE' },
